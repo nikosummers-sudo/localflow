@@ -26,7 +26,15 @@ Gatekeeper warnings), installs it to /Applications, and launches it. Then:
 3. Hold **Right Option** anywhere and talk. For the AI cleanup step (optional but nice),
    install [Ollama](https://ollama.com) and run `ollama pull gemma3:4b`.
 
-**To update later**: paste the same command again — settings and permissions survive.
+**Updates are automatic.** The installer sets up a background agent that checks this repo
+every 6 hours and quietly rebuilds and swaps in new versions — settings and permissions
+survive. You can also update immediately by pasting the install command again, or turn
+auto-updates off with:
+
+```bash
+launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.nikosummers.localflow.updater.plist \
+  && rm ~/Library/LaunchAgents/com.nikosummers.localflow.updater.plist
+```
 
 ## How it works
 

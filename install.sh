@@ -68,7 +68,31 @@ else
   echo "To enable it: install Ollama from https://ollama.com then run:  ollama pull gemma3:4b"
 fi
 
-# ── 7. Launch ─────────────────────────────────────────────────────────────────
+# ── 7. Auto-updates (background check every 6 h; silent rebuild + swap) ──────
+PLIST="$HOME/Library/LaunchAgents/com.nikosummers.localflow.updater.plist"
+mkdir -p "$HOME/Library/LaunchAgents"
+cat >"$PLIST" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.nikosummers.localflow.updater</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>$SRC/Scripts/auto-update.sh</string>
+  </array>
+  <key>StartInterval</key><integer>21600</integer>
+  <key>RunAtLoad</key><true/>
+</dict>
+</plist>
+PLIST
+launchctl bootout "gui/$(id -u)" "$PLIST" 2>/dev/null || true
+launchctl bootstrap "gui/$(id -u)" "$PLIST" 2>/dev/null || launchctl load "$PLIST" 2>/dev/null || true
+echo "✓ Auto-updates on: checks GitHub every 6 hours and swaps in new versions."
+echo "  (Disable: launchctl bootout gui/\$(id -u) \"$PLIST\" && rm \"$PLIST\")"
+
+# ── 8. Launch ─────────────────────────────────────────────────────────────────
 open "$DEST/LocalFlow.app"
 bold "LocalFlow is running — look for the mic icon in your menu bar (top-right)."
 cat <<'EOF'
