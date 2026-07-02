@@ -1,0 +1,106 @@
+import Foundation
+import LocalFlowKit
+
+// Exercises the transcript cleanup path end-to-end against the local Ollama
+// server. Prints "RAW: …" and "CLEANED: …". Exits non-zero if Ollama is
+// unreachable (so it doubles as a health check).
+//
+// Usage:
+//   CleanupCheck                 -> cleans a built-in messy sample
+//   CleanupCheck "some text…"    -> cleans the given transcript
+//   CleanupCheck --selftest      -> runs the pure post-guard checks (no network)
+
+let defaultSample = "um so this is uh this is a test I I want to say hello world and and make sure it um you know works properly"
+
+func stderr(_ message: String) {
+    FileHandle.standardError.write(Data((message + "\n").utf8))
+}
+
+let args = Array(CommandLine.arguments.dropFirst())
+
+// MARK: - Self-test (deterministic, offline)
+
+if args.contains("--selftest") {
+    var failures = 0
+
+    func check(_ name: String, _ condition: Bool) {
+        print("\(condition ? "PASS" : "FAIL"): \(name)")
+        if !condition { failures += 1 }
+    }
+
+    let raw = "this is a short transcript that is definitely over fifty characters long ok"
+
+    // Divergence: output far too long -> reject to raw with divergence note.
+    let bloated = String(repeating: "word ", count: raw.count)
+    let g1 = TranscriptCleaner.applyGuards(cleaned: bloated, raw: raw)
+    check("over-long output rejected as divergence", g1.text == raw && g1.note == "Cleanup diverged — inserted raw transcript")
+
+    // Divergence: output far too short -> reject to raw with divergence note.
+    let g2 = TranscriptCleaner.applyGuards(cleaned: "tiny", raw: raw)
+    check("too-short output rejected as divergence", g2.text == raw && g2.note == "Cleanup diverged — inserted raw transcript")
+
+    // Empty output -> raw, no note.
+    let g3 = TranscriptCleaner.applyGuards(cleaned: "   \n  ", raw: raw)
+    check("empty output falls back to raw", g3.text == raw && g3.note == nil)
+
+    // In-range output -> accepted, no note, wrapping quotes stripped.
+    let quoted = "\"This is a short transcript that is definitely over fifty characters long. OK.\""
+    let g4 = TranscriptCleaner.applyGuards(cleaned: quoted, raw: raw)
+    check("in-range output accepted with wrapping quotes stripped", g4.note == nil && !g4.text.hasPrefix("\"") && !g4.text.hasSuffix("\""))
+
+    // Code-fence wrapping stripped.
+    let fenced = "```\nThis is a short transcript that is definitely over fifty characters long.\n```"
+    let g5 = TranscriptCleaner.applyGuards(cleaned: fenced, raw: raw)
+    check("code fence stripped", !g5.text.contains("```") && g5.note == nil)
+
+    // Gate: short input returns unchanged and is not sent to the model.
+    let short = "hi there"
+    check("short input below gate not sent to model", !TranscriptCleaner.willRun(for: short))
+
+    print(failures == 0 ? "SELFTEST: OK" : "SELFTEST: \(failures) FAILURE(S)")
+    exit(failures == 0 ? 0 : 1)
+}
+
+// MARK: - Placeholder-preservation check (live, hits Ollama)
+
+// Verifies the cleanup model leaves voice-command placeholders untouched when the
+// placeholder rule is in the system prompt. Prints the raw and cleaned text
+// verbatim so the token can be eyeballed. Exits non-zero if the token is dropped.
+if args.contains("--placeholder") {
+    let sample = "so the plan is simple \u{27E6}NL\u{27E7} first we ship phase three \u{27E6}NL\u{27E7} then we test it thoroughly with real dictation"
+    let cleaner = TranscriptCleaner(client: OllamaClient())
+    let context = CleanupContext(includePlaceholderRule: true)
+
+    print("RAW: \(sample)")
+    let result = await cleaner.clean(sample, context: context)
+    print("CLEANED: \(result.text)")
+    if let note = result.note { stderr("NOTE: \(note)") }
+
+    let kept = result.text.components(separatedBy: "\u{27E6}NL\u{27E7}").count - 1
+    print("PLACEHOLDERS_KEPT: \(kept) of 2")
+    if kept < 2 {
+        stderr("WARN: cleanup dropped or altered a placeholder")
+        exit(1)
+    }
+    exit(0)
+}
+
+// MARK: - Live cleanup
+
+let raw = args.isEmpty ? defaultSample : args.joined(separator: " ")
+
+let cleaner = TranscriptCleaner(client: OllamaClient())
+
+print("RAW: \(raw)")
+let result = await cleaner.clean(raw)
+print("CLEANED: \(result.text)")
+
+if let note = result.note {
+    stderr("NOTE: \(note)")
+}
+
+// Unreachable server produces exactly this note; treat it as a health failure.
+if TranscriptCleaner.willRun(for: raw), result.note == "Cleanup unavailable — inserted raw transcript" {
+    stderr("ERROR: Ollama unreachable at \(UserDefaults.standard.string(forKey: "ollamaURL") ?? OllamaClient.defaultBaseURL)")
+    exit(1)
+}

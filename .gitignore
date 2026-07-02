@@ -1,0 +1,9 @@
+.build/
+build/
+*.xcodeproj
+.DS_Store
+.swiftpm/
+# local working files, not part of the distributed project
+FABLE5-GOAL-PROMPT.md
+.claudeignore
+.claude/

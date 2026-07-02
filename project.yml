@@ -1,0 +1,56 @@
+# XcodeGen spec for LocalFlow.
+#
+# This file is NOT used by the current SwiftPM + Command Line Tools build
+# (use `make app`). It exists so the project can be opened in a full Xcode
+# install later. It requires Xcode and XcodeGen:
+#
+#   brew install xcodegen
+#   xcodegen generate
+#   open LocalFlow.xcodeproj
+#
+# The targets, Info.plist keys, and WhisperKit dependency mirror Package.swift.
+
+name: LocalFlow
+options:
+  bundleIdPrefix: com.nikosummers
+  deploymentTarget:
+    macOS: "14.0"
+  createIntermediateGroups: true
+
+packages:
+  WhisperKit:
+    url: https://github.com/argmaxinc/WhisperKit.git
+    from: 0.9.0
+
+targets:
+  LocalFlow:
+    type: application
+    platform: macOS
+    deploymentTarget: "14.0"
+    sources:
+      - path: Sources/LocalFlow
+    dependencies:
+      - package: WhisperKit
+        product: WhisperKit
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.nikosummers.LocalFlow
+        MARKETING_VERSION: "0.1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        INFOPLIST_FILE: Sources/LocalFlow/Info.plist
+        # Ad-hoc signing; app sandbox and hardened runtime disabled so the
+        # global event tap and synthetic paste work during local development.
+        CODE_SIGN_IDENTITY: "-"
+        CODE_SIGN_STYLE: Manual
+        ENABLE_APP_SANDBOX: NO
+        ENABLE_HARDENED_RUNTIME: NO
+
+  SttSmokeCheck:
+    type: tool
+    platform: macOS
+    deploymentTarget: "14.0"
+    sources:
+      - path: Sources/SttSmokeCheck
+    dependencies:
+      - package: WhisperKit
+        product: WhisperKit
