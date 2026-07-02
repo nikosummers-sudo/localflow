@@ -49,7 +49,7 @@ make app
 
 DEST="/Applications"
 [ -w "$DEST" ] || { DEST="$HOME/Applications"; mkdir -p "$DEST"; }
-bold "Installing to $DEST…"
+bold "Installing to ${DEST}…"
 pkill -x LocalFlow 2>/dev/null || true
 rm -rf "$DEST/LocalFlow.app"
 ditto build/LocalFlow.app "$DEST/LocalFlow.app"
