@@ -99,10 +99,16 @@ cat <<'EOF'
 Next steps:
   1. Grant the three permissions in the Setup window (Microphone, Accessibility,
      Input Monitoring), then click "Relaunch LocalFlow".
+     (If Input Monitoring doesn't list LocalFlow, click the + button in that
+      System Settings pane and add it from /Applications.)
   2. Your first dictation downloads the speech model (~1.6 GB, one-time).
      The menu bar icon shows progress; wait for "Ready".
   3. Hold RIGHT OPTION anywhere and talk. Release to insert.
      Press Right Option + Space to lock hands-free; tap Right Option to finish.
 
-To update LocalFlow later, paste the install command again.
+LocalFlow lives in the menu bar (mic icon, top-right) and starts automatically
+when you log in. To reopen its Setup window, click the menu bar icon — or
+double-click LocalFlow in /Applications.
+
+Updates install themselves automatically (checked every 6 hours).
 EOF

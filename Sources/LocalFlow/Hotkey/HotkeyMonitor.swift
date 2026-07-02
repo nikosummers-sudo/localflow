@@ -1,26 +1,25 @@
 import ApplicationServices
 import CoreGraphics
 import Foundation
+import LocalFlowKit
 
-/// Watches a single "dictation" modifier key (Right Option by default) system-wide
-/// via a CGEventTap, and drives a small state machine that supports two gestures:
+/// Watches the user's configured dictation shortcut system-wide via a CGEventTap and
+/// drives a small state machine supporting two gesture families:
 ///
-///  - Hold: press-and-hold the hotkey to record, release to finish (`holdRecording`).
-///  - Lock: while holding the hotkey, tap Space to lock recording hands-free
-///    (`lockedRecording`); release the hotkey and it keeps going; tap the hotkey
-///    again to finish.
+///  - Modifier hold (`.modifierHold`): hold ALL the configured modifier keys to record,
+///    release any to finish (`holdRecording`). While holding, tap Space to lock recording
+///    hands-free (`lockedRecording`); release the modifiers and it keeps going; press a
+///    configured modifier again to finish. Single-modifier holds behave exactly like the
+///    original Right Option gesture.
+///  - Combo toggle (`.comboToggle`): press a key combination once to start recording
+///    hands-free, press it again to finish. The matching key events are swallowed so they
+///    never reach the focused app; Space is not special in this mode.
 ///
-/// Locking requires swallowing the Space keystroke so it never reaches the focused
-/// app, which needs an ACTIVE tap (`.defaultTap`). Active taps require Input
-/// Monitoring; when the OS refuses one we fall back to a listen-only tap so lock
-/// mode still works, only the Space can no longer be consumed (`canConsumeEvents`).
+/// Locking (and combo swallowing) needs an ACTIVE tap (`.defaultTap`), which requires
+/// Input Monitoring. When the OS refuses one we fall back to a listen-only tap: gestures
+/// still fire, but key events can no longer be consumed (`canConsumeEvents`).
 final class HotkeyMonitor {
-    static let defaultsKey = "hotkeyKeyCode"
-
-    /// Right Option. Also supported: 54 (Right Command), 62 (Right Control).
-    static let defaultKeyCode: Int64 = 61
-
-    /// Space — locks recording while the hotkey is held.
+    /// Space — locks recording while a modifier-hold shortcut is held.
     private static let spaceKeyCode: Int64 = 49
 
     var onKeyDown: (() -> Void)?
@@ -35,16 +34,20 @@ final class HotkeyMonitor {
 
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
-    private(set) var keyCode: Int64
+    private var binding: HotkeyBinding
     private var state: State = .idle
 
-    /// True when the tap is active and can swallow the Space that engages lock mode.
-    /// False when we had to fall back to a listen-only tap.
+    /// For `.modifierHold`: which of the target modifier keycodes are currently down.
+    private var heldTargets: Set<Int64> = []
+    /// For `.comboToggle`: the keycode whose next keyUp we should consume (it pairs with
+    /// a keyDown we already swallowed).
+    private var pendingKeyUpConsume: Int64?
+
+    /// True when the tap is active and can swallow keys; false on the listen-only fallback.
     private(set) var canConsumeEvents = false
 
     init() {
-        let stored = UserDefaults.standard.integer(forKey: HotkeyMonitor.defaultsKey)
-        keyCode = stored == 0 ? HotkeyMonitor.defaultKeyCode : Int64(stored)
+        binding = HotkeyBinding.load()
     }
 
     var isRunning: Bool { eventTap != nil }
@@ -54,23 +57,25 @@ final class HotkeyMonitor {
     func start() -> Bool {
         stop()
 
-        // flagsChanged tracks the modifier; keyDown lets us catch (and consume) Space.
+        // flagsChanged tracks held modifiers; keyDown catches combo keys and the Space
+        // that locks; keyUp lets us swallow the release paired with a consumed combo key.
         let mask = CGEventMask(
-            (1 << CGEventType.flagsChanged.rawValue) | (1 << CGEventType.keyDown.rawValue)
+            (1 << CGEventType.flagsChanged.rawValue)
+                | (1 << CGEventType.keyDown.rawValue)
+                | (1 << CGEventType.keyUp.rawValue)
         )
         let refcon = Unmanaged.passUnretained(self).toOpaque()
 
         let callback: CGEventTapCallBack = { _, type, event, refcon in
             guard let refcon else { return Unmanaged.passUnretained(event) }
             let monitor = Unmanaged<HotkeyMonitor>.fromOpaque(refcon).takeUnretainedValue()
-            // Consume only the Space that engages lock mode; pass everything else through.
             if monitor.handle(type: type, event: event) {
-                return nil
+                return nil // consume (Space lock, or a combo key + its keyUp)
             }
             return Unmanaged.passUnretained(event)
         }
 
-        // Prefer an active tap so Space can be swallowed.
+        // Prefer an active tap so keys can be swallowed.
         if let tap = CGEvent.tapCreate(
             tap: .cgSessionEventTap,
             place: .headInsertEventTap,
@@ -84,7 +89,7 @@ final class HotkeyMonitor {
             return true
         }
 
-        // Fall back to listen-only: lock mode still works, but Space can't be consumed.
+        // Fall back to listen-only: gestures still fire, but keys can't be consumed.
         if let tap = CGEvent.tapCreate(
             tap: .cgSessionEventTap,
             place: .headInsertEventTap,
@@ -119,21 +124,21 @@ final class HotkeyMonitor {
         eventTap = nil
         runLoopSource = nil
         state = .idle
+        heldTargets = []
+        pendingKeyUpConsume = nil
     }
 
-    /// Re-reads the configured keycode and restarts the tap.
+    /// Re-reads the configured binding and restarts the tap.
     @discardableResult
     func restart() -> Bool {
-        let stored = UserDefaults.standard.integer(forKey: HotkeyMonitor.defaultsKey)
-        keyCode = stored == 0 ? HotkeyMonitor.defaultKeyCode : Int64(stored)
+        binding = HotkeyBinding.load()
         return start()
     }
 
-    /// Handles one tapped event. Returns true iff the event should be consumed
-    /// (only ever the Space that engages lock mode). Runs on the main run loop,
-    /// so it reads/writes `state` synchronously and keeps its work trivial.
+    /// Handles one tapped event. Returns true iff the event should be consumed. Runs on
+    /// the main run loop, so it reads/writes state synchronously and keeps work trivial.
     private func handle(type: CGEventType, event: CGEvent) -> Bool {
-        // The system disables a tap that blocks too long or on user input; re-enable it.
+        // The system disables a tap that blocks too long or on heavy input; re-enable it.
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
             if let tap = eventTap {
                 CGEvent.tapEnable(tap: tap, enable: true)
@@ -143,6 +148,17 @@ final class HotkeyMonitor {
 
         let code = event.getIntegerValueField(.keyboardEventKeycode)
 
+        switch binding {
+        case let .modifierHold(keyCodes):
+            return handleModifierHold(type: type, event: event, code: code, targets: keyCodes)
+        case .comboToggle:
+            return handleComboToggle(type: type, event: event, code: code)
+        }
+    }
+
+    // MARK: - Modifier hold
+
+    private func handleModifierHold(type: CGEventType, event: CGEvent, code: Int64, targets: Set<Int64>) -> Bool {
         if type == .keyDown {
             if code == HotkeyMonitor.spaceKeyCode, state == .holdRecording {
                 state = .lockedRecording
@@ -152,45 +168,69 @@ final class HotkeyMonitor {
             return false
         }
 
-        guard type == .flagsChanged, code == keyCode else { return false }
+        guard type == .flagsChanged, targets.contains(code) else { return false }
+        guard let flag = HotkeyBinding.modifierFlag(forKeyCode: code) else { return false }
 
-        let pressed = event.flags.contains(flagMask(for: keyCode))
-        if pressed {
-            switch state {
-            case .idle:
-                state = .holdRecording
-                fire(onKeyDown)
-            case .lockedRecording:
-                // Tap the hotkey again to finish a hands-free recording.
-                state = .idle
-                fire(onKeyUp)
-            case .holdRecording:
-                break
-            }
-        } else {
-            switch state {
-            case .holdRecording:
-                state = .idle
-                fire(onKeyUp)
-            case .lockedRecording, .idle:
-                // Locked: releasing the hotkey keeps recording. Idle: this is the
-                // release that follows a tap-to-finish — ignore it cleanly.
-                break
-            }
+        let wasHeld = heldTargets.contains(code)
+        let isPressed = event.flags.contains(flag)
+        if isPressed { heldTargets.insert(code) } else { heldTargets.remove(code) }
+        let allHeld = targets.isSubset(of: heldTargets)
+
+        switch state {
+        case .idle:
+            // Start once every target modifier is held together.
+            if allHeld { state = .holdRecording; fire(onKeyDown) }
+        case .holdRecording:
+            // Releasing any target finishes the hold recording.
+            if !allHeld { state = .idle; fire(onKeyUp) }
+        case .lockedRecording:
+            // Locked and hands-free: a fresh press of any target finishes; releases
+            // (the user letting go after locking) are ignored.
+            if isPressed && !wasHeld { state = .idle; fire(onKeyUp) }
         }
         return false
+    }
+
+    // MARK: - Combo toggle
+
+    private func handleComboToggle(type: CGEventType, event: CGEvent, code: Int64) -> Bool {
+        // Swallow the keyUp that pairs with a keyDown we already consumed, so the
+        // release never reaches the focused app.
+        if type == .keyUp {
+            if pendingKeyUpConsume == code {
+                pendingKeyUpConsume = nil
+                return true
+            }
+            return false
+        }
+
+        guard type == .keyDown else { return false } // ignore flagsChanged in combo mode
+
+        guard HotkeyBinding.matchesCombo(eventKeyCode: code, eventFlags: event.flags, binding: binding) else {
+            return false
+        }
+
+        // Consume every matching keyDown (including autorepeat) so it never types, but
+        // only toggle on the first press — autorepeat must not flip recording on/off.
+        pendingKeyUpConsume = code
+        if event.getIntegerValueField(.keyboardEventAutorepeat) == 0 {
+            switch state {
+            case .idle:
+                // Start recording hands-free: fire start, then engage lock so the HUD
+                // and menu reflect the hands-free state.
+                state = .lockedRecording
+                fire(onKeyDown)
+                fire(onLockEngaged)
+            case .holdRecording, .lockedRecording:
+                state = .idle
+                fire(onKeyUp)
+            }
+        }
+        return true
     }
 
     private func fire(_ callback: (() -> Void)?) {
         guard let callback else { return }
         DispatchQueue.main.async { callback() }
-    }
-
-    private func flagMask(for keyCode: Int64) -> CGEventFlags {
-        switch keyCode {
-        case 54: return .maskCommand   // Right Command
-        case 62: return .maskControl   // Right Control
-        default: return .maskAlternate // Right Option (61)
-        }
     }
 }

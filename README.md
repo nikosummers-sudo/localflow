@@ -38,13 +38,14 @@ launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.nikosummers.localflow.
 
 ## How it works
 
-1. Hold the **Right Option** key in any app (or tap **Space** while holding it to lock
-   recording and dictate hands-free — see [Usage](#usage)).
+1. Press your dictation shortcut in any app. By default that's **holding Right Option**
+   (tap **Space** while holding to lock recording and dictate hands-free), but you can bind
+   any key or combination in Settings — see [Usage](#usage) and [Settings](#settings).
 2. LocalFlow records from your microphone while recording is active. A small floating
    **pill** near the bottom of the screen reacts to your voice with an animated level meter,
    so you can see it's listening at a glance.
-3. On release (or a second Right Option tap in locked mode), WhisperKit transcribes the
-   audio locally with your main model.
+3. When you end the shortcut (release the held modifier, or press the combo again),
+   WhisperKit transcribes the audio locally with your main model.
 4. Optionally, a local LLM (via [Ollama](https://ollama.com)) **cleans up** the transcript —
    fixing punctuation and removing filler words and false starts — without changing your
    meaning. This is fully local and falls back to the raw transcript if unavailable.
@@ -224,9 +225,13 @@ Permissions…**) walks through them with live status and buttons.
 
 | Permission          | Why                                                            | System Settings pane                                             |
 |---------------------|----------------------------------------------------------------|------------------------------------------------------------------|
-| **Microphone**      | Records your voice while the dictation key is held.            | Privacy & Security → Microphone                                  |
+| **Microphone**      | Records your voice while you dictate.                          | Privacy & Security → Microphone                                  |
 | **Accessibility**   | Pastes the transcript into the app you're using (synthetic Cmd+V). | Privacy & Security → Accessibility                          |
-| **Input Monitoring**| Detects the Right Option key being held, system-wide.          | Privacy & Security → Input Monitoring                            |
+| **Input Monitoring**| Detects your dictation shortcut being pressed, system-wide.    | Privacy & Security → Input Monitoring                            |
+
+LocalFlow registers itself in the Input Monitoring pane on first launch, so its row should
+already be there to toggle on. If it isn't listed, click the **+** button in that pane and
+add LocalFlow from **/Applications**.
 
 If Accessibility is not granted, LocalFlow still transcribes and leaves the text on your
 clipboard so you can paste it manually — it just won't auto-paste.
@@ -239,13 +244,16 @@ than a lost transcript.
 
 ## Usage
 
-There are two ways to dictate:
+Your dictation shortcut is fully configurable (see [Settings](#settings)); the default is
+holding **Right Option**. There are two gesture styles, depending on what you bind:
 
-- **Hold to talk.** Hold **Right Option**, speak, release. The text appears at your cursor.
-- **Lock hands-free.** While holding **Right Option**, tap **Space** to lock recording. You
-  can now let go of Right Option and keep talking hands-free — the Space keystroke is
-  swallowed, so it won't type into your document. Tap **Right Option** again to stop,
-  transcribe, and insert.
+- **Modifier hold (hold to talk).** Hold the modifier(s), speak, release. The text appears
+  at your cursor. While holding, tap **Space** to lock recording — you can then let go and
+  keep talking hands-free (the Space keystroke is swallowed, so it won't type into your
+  document). Press the modifier again to stop, transcribe, and insert.
+- **Key combo (press to toggle).** If you bind a key combination (e.g. **⌘⇧D**), press it
+  once to start recording hands-free and press it again to finish. The combo is swallowed
+  system-wide while LocalFlow runs, so choose one no other app needs.
 
 The menu bar icon reflects the current state: idle (`mic`), recording (`mic.fill`), locked
 recording (`mic.badge.plus`), loading a model, transcribing (`waveform`), cleaning up
@@ -270,8 +278,18 @@ Menu bar → **Settings…**:
 
 - **Model** — `tiny` / `base` / `small` / `large-v3` / `large-v3_turbo` (default). Changing
   it downloads the new model on next load. A **Reload model** button forces a reload.
-- **Dictation key** — Right Option (default), Right Command, or Right Control. Takes effect
-  immediately.
+- **Dictation shortcut** — click the field and press the keys you want, then let go.
+  Recording captures the shortcut with no restart needed. Two styles are supported:
+  - *Modifier-only* (one or more modifier keys, e.g. Right Option, or Right ⌘ + Right ⌥) is
+    **hold-to-talk** — hold to dictate, tap **Space** while holding to lock hands-free.
+  - *Key combo* (a key plus modifiers, e.g. **⌘⇧D**) is **press-to-start / press-again-to-finish**
+    and works hands-free. Combos are swallowed system-wide, so pick one no other app needs.
+
+  A **Reset to default** button restores holding Right Option. Bindings that would break
+  normal use are refused with an inline note — a plain printable key with no modifier, the
+  Space key, and system-reserved combos like ⌘V / ⌘C / ⌘X / ⌘Q / ⌘W.
+- **Launch LocalFlow at login** — **on by default**. Starts LocalFlow automatically when you
+  log in so it's always ready in the menu bar. Turn it off to launch it yourself.
 - **Restore clipboard after pasting** — on by default; restores your previous clipboard
   contents ~0.6s after inserting text.
 - **Microphone**

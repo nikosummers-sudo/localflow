@@ -7,9 +7,9 @@ struct LocalFlowApp: App {
 
     var body: some Scene {
         MenuBarExtra {
-            Text(appState.status.menuText)
+            Text(appState.statusMenuText)
                 .disabled(true)
-            Text("Hold Right Option to dictate, or Right Option+Space to lock hands-free; tap Right Option to finish")
+            Text(appState.hotkeyBinding.menuHint)
                 .disabled(true)
 
             Divider()

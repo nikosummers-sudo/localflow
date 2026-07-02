@@ -13,6 +13,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         hotkeyMonitor.onKeyDown = { AppState.shared.startDictation() }
         hotkeyMonitor.onKeyUp = { AppState.shared.stopDictation() }
         hotkeyMonitor.onLockEngaged = { AppState.shared.lockDictation() }
+
+        // Keep the login-item registration in sync with the saved setting (default on).
+        LaunchAtLogin.reconcile()
+
         let tapStarted = hotkeyMonitor.start()
 
         // The HUD observes AppState and shows/hides itself as dictation proceeds.
@@ -63,6 +67,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             )
             onboardingWindow = makeWindow(title: "LocalFlow Setup", width: 460, height: 540, content: view)
         }
+
+        // Register (and prompt for) Input Monitoring as setup opens, so LocalFlow's row
+        // exists in the pane before the user ever looks — no manual "+" needed. Fired here
+        // (not at bare launch) so it doesn't stack on top of the microphone prompt.
+        if !PermissionsManager.shared.inputMonitoringGranted {
+            PermissionsManager.shared.requestInputMonitoring()
+        }
+
         present(onboardingWindow)
     }
 
@@ -70,7 +82,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if settingsWindow == nil {
             let view = SettingsView(
                 onModelChanged: { AppState.shared.reloadEngine() },
-                onHotkeyChanged: { [weak self] in self?.hotkeyMonitor.restart() },
+                onHotkeyChanged: { [weak self] in
+                    self?.hotkeyMonitor.restart()
+                    AppState.shared.refreshHotkeyBinding()
+                },
                 onPartialsChanged: { AppState.shared.reloadPartials() },
                 onCleanupChanged: { AppState.shared.warmCleanupModel() },
                 onInstantCaptureChanged: { AppState.shared.refreshContinuousCapture() }

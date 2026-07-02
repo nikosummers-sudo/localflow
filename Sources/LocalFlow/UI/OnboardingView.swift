@@ -31,7 +31,7 @@ struct OnboardingView: View {
                 VStack(spacing: 14) {
                     row(
                         title: "Microphone",
-                        why: "Captures your voice while you hold the dictation key.",
+                        why: "Captures your voice while you dictate.",
                         granted: micGranted,
                         request: {
                             perms.requestMicrophone { _ in refresh() }
@@ -47,10 +47,11 @@ struct OnboardingView: View {
                     )
                     row(
                         title: "Input Monitoring",
-                        why: "Detects the Right Option key being held, system-wide.",
+                        why: "Detects your dictation shortcut being pressed, system-wide.",
                         granted: inputMonitoringGranted,
                         request: { _ = perms.requestInputMonitoring() },
-                        openSettings: perms.openInputMonitoringSettings
+                        openSettings: perms.openInputMonitoringSettings,
+                        hint: "Not in the list? Click + and add LocalFlow from /Applications."
                     )
                 }
             }
@@ -77,8 +78,11 @@ struct OnboardingView: View {
                 .font(.largeTitle)
             VStack(alignment: .leading, spacing: 4) {
                 Text("You're all set!").font(.headline)
-                Text("Hold Right Option to dictate, or press Right Option+Space to lock hands-free; tap Right Option to finish.")
+                Text(AppState.shared.hotkeyBinding.onboardingHint)
                     .font(.subheadline)
+                    .foregroundColor(.secondary)
+                Text("LocalFlow starts automatically at login and lives in your menu bar (the microphone icon). You can change that in Settings.")
+                    .font(.caption)
                     .foregroundColor(.secondary)
             }
         }
@@ -90,7 +94,8 @@ struct OnboardingView: View {
         why: String,
         granted: Bool,
         request: @escaping () -> Void,
-        openSettings: @escaping () -> Void
+        openSettings: @escaping () -> Void,
+        hint: String? = nil
     ) -> some View {
         HStack(alignment: .top, spacing: 12) {
             Image(systemName: granted ? "checkmark.circle.fill" : "xmark.circle.fill")
@@ -107,6 +112,11 @@ struct OnboardingView: View {
                         Button("Open System Settings", action: openSettings)
                     }
                     .padding(.top, 2)
+                    if let hint {
+                        Text(hint)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
                 }
             }
             Spacer()

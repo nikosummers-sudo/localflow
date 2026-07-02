@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 import LocalFlowKit
 
@@ -50,6 +51,117 @@ if CommandLine.arguments.contains("--store") {
 
     try? FileManager.default.removeItem(at: dir)
     print(failures == 0 ? "STORE: OK" : "STORE: \(failures) FAILURE(S)")
+    exit(failures == 0 ? 0 : 1)
+}
+
+// MARK: - Hotkey binding logic (pure, no key events)
+
+if CommandLine.arguments.contains("--hotkey") {
+    // Build CGEventFlags from the standard masks so tests need no live events.
+    func flags(_ masks: CGEventFlags...) -> CGEventFlags {
+        var out = CGEventFlags()
+        for m in masks { out.insert(m) }
+        return out
+    }
+
+    func roundTrip(_ binding: HotkeyBinding) -> HotkeyBinding? {
+        guard let data = try? JSONEncoder().encode(binding),
+              let decoded = try? JSONDecoder().decode(HotkeyBinding.self, from: data) else { return nil }
+        return decoded
+    }
+
+    // --- JSON encode/decode round-trips
+    check("modifierHold round-trips through JSON",
+          roundTrip(.modifierHold(keyCodes: [61])) == .modifierHold(keyCodes: [61]))
+    check("comboToggle round-trips through JSON",
+          roundTrip(.comboToggle(keyCode: 2, requiredModifiers: HotkeyBinding.modCommand | HotkeyBinding.modShift))
+              == .comboToggle(keyCode: 2, requiredModifiers: HotkeyBinding.modCommand | HotkeyBinding.modShift))
+    check("multi-modifier hold round-trips through JSON",
+          roundTrip(.modifierHold(keyCodes: [54, 61])) == .modifierHold(keyCodes: [54, 61]))
+
+    // --- Legacy migration
+    check("migrate(legacyKeyCode:) wraps the keycode in a hold",
+          HotkeyBinding.migrate(legacyKeyCode: 61) == .modifierHold(keyCodes: [61]))
+    check("migrate maps Right Control legacy keycode",
+          HotkeyBinding.migrate(legacyKeyCode: 62) == .modifierHold(keyCodes: [62]))
+
+    do {
+        // Isolated defaults: legacy keycode present, no JSON binding → migrated on load.
+        let suite = "localflow-hotkeycheck-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defaults.set(54, forKey: HotkeyBinding.legacyKeyCodeDefaultsKey)
+        check("load() migrates legacy keycode when no JSON binding exists",
+              HotkeyBinding.load(from: defaults) == .modifierHold(keyCodes: [54]))
+
+        // Now a JSON binding is present → it wins over the legacy keycode.
+        let combo = HotkeyBinding.comboToggle(keyCode: 2, requiredModifiers: HotkeyBinding.modCommand | HotkeyBinding.modShift)
+        combo.save(to: defaults)
+        check("load() prefers the JSON binding over the legacy keycode",
+              HotkeyBinding.load(from: defaults) == combo)
+
+        defaults.removePersistentDomain(forName: suite)
+    }
+
+    do {
+        // No binding, no legacy keycode → default.
+        let defaults = UserDefaults(suiteName: "localflow-hotkeycheck-empty-\(UUID().uuidString)")!
+        check("load() falls back to the default when nothing is stored",
+              HotkeyBinding.load(from: defaults) == HotkeyBinding.default)
+    }
+
+    // --- matchesCombo exact-modifier semantics
+    let cmdD = HotkeyBinding.comboToggle(keyCode: 2, requiredModifiers: HotkeyBinding.modCommand)
+    let cmdShiftD = HotkeyBinding.comboToggle(keyCode: 2, requiredModifiers: HotkeyBinding.modCommand | HotkeyBinding.modShift)
+
+    check("⌘D fires on ⌘D",
+          HotkeyBinding.matchesCombo(eventKeyCode: 2, eventFlags: flags(.maskCommand), binding: cmdD))
+    check("⌘D does NOT fire on ⌘⇧D (extra modifier)",
+          !HotkeyBinding.matchesCombo(eventKeyCode: 2, eventFlags: flags(.maskCommand, .maskShift), binding: cmdD))
+    check("⌘⇧D fires on ⌘⇧D",
+          HotkeyBinding.matchesCombo(eventKeyCode: 2, eventFlags: flags(.maskCommand, .maskShift), binding: cmdShiftD))
+    check("⌘⇧D does NOT fire on ⌘D (missing modifier)",
+          !HotkeyBinding.matchesCombo(eventKeyCode: 2, eventFlags: flags(.maskCommand), binding: cmdShiftD))
+    check("combo does NOT fire on a different keycode",
+          !HotkeyBinding.matchesCombo(eventKeyCode: 3, eventFlags: flags(.maskCommand), binding: cmdD))
+    check("a modifierHold binding never matches as a combo",
+          !HotkeyBinding.matchesCombo(eventKeyCode: 2, eventFlags: flags(.maskCommand), binding: .modifierHold(keyCodes: [61])))
+
+    // --- normalize flag math
+    check("normalize drops non-generic bits (numeric pad)",
+          HotkeyBinding.normalize(flags(.maskCommand, .maskShift, .maskNumericPad))
+              == (HotkeyBinding.modCommand | HotkeyBinding.modShift))
+    check("normalize of no flags is empty",
+          HotkeyBinding.normalize(CGEventFlags()) == 0)
+    check("normalize maps all five generic modifiers",
+          HotkeyBinding.normalize(flags(.maskCommand, .maskControl, .maskAlternate, .maskShift, .maskSecondaryFn))
+              == (HotkeyBinding.modCommand | HotkeyBinding.modControl | HotkeyBinding.modOption | HotkeyBinding.modShift | HotkeyBinding.modFn))
+
+    // --- description rendering
+    check("single-modifier hold description [\(HotkeyBinding.modifierHold(keyCodes: [61]).description)]",
+          HotkeyBinding.modifierHold(keyCodes: [61]).description == "Hold Right Option")
+    check("combo description renders ⌘⇧D [\(cmdShiftD.description)]",
+          cmdShiftD.description == "⌘⇧D")
+    check("multi-modifier hold description [\(HotkeyBinding.modifierHold(keyCodes: [54, 61]).description)]",
+          HotkeyBinding.modifierHold(keyCodes: [54, 61]).description == "Hold Right ⌘ + Right ⌥")
+    check("bare F-key combo description [\(HotkeyBinding.comboToggle(keyCode: 96, requiredModifiers: 0).description)]",
+          HotkeyBinding.comboToggle(keyCode: 96, requiredModifiers: 0).description == "F5")
+
+    // --- validation
+    func isValid(_ binding: HotkeyBinding) -> Bool { HotkeyBinding.validate(binding) == .valid }
+    check("bare printable key with no modifier is rejected",
+          !isValid(.comboToggle(keyCode: 2, requiredModifiers: 0)))
+    check("bare F-key is allowed",
+          isValid(.comboToggle(keyCode: 96, requiredModifiers: 0)))
+    check("⌘V is rejected (paste conflict)",
+          !isValid(.comboToggle(keyCode: 9, requiredModifiers: HotkeyBinding.modCommand)))
+    check("Space in a combo is rejected",
+          !isValid(.comboToggle(keyCode: 49, requiredModifiers: HotkeyBinding.modCommand)))
+    check("a normal modifier hold is valid",
+          isValid(.modifierHold(keyCodes: [61])))
+    check("an empty modifier hold is rejected",
+          !isValid(.modifierHold(keyCodes: [])))
+
+    print(failures == 0 ? "HOTKEY: OK" : "HOTKEY: \(failures) FAILURE(S)")
     exit(failures == 0 ? 0 : 1)
 }
 

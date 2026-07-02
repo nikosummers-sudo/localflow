@@ -52,7 +52,7 @@ final class AppState: ObservableObject {
             case .idle: return "Ready"
             case .loadingModel: return "Loading model…"
             case .recording: return "Recording…"
-            case .recordingLocked: return "Recording (locked) — tap Right Option to finish"
+            case .recordingLocked: return "Recording (locked)"
             case .transcribing: return "Transcribing…"
             case .cleaning: return "Cleaning…"
             case .pasting: return "Inserting text…"
@@ -80,6 +80,22 @@ final class AppState: ObservableObject {
     }
 
     @Published private(set) var status: Status = .idle
+
+    /// The current dictation shortcut, mirrored here so menu/HUD copy updates reactively
+    /// when the user changes it in Settings. Refreshed via `refreshHotkeyBinding()`.
+    @Published private(set) var hotkeyBinding: HotkeyBinding = HotkeyBinding.load()
+
+    /// The menu-bar status line. Locked recording is shown with the shortcut-specific
+    /// finish gesture ("tap Right Option to finish", "press ⌘⇧D to finish").
+    var statusMenuText: String {
+        if status == .recordingLocked { return hotkeyBinding.lockedStatusText }
+        return status.menuText
+    }
+
+    /// Re-reads the persisted binding after the user changes it in Settings.
+    func refreshHotkeyBinding() {
+        hotkeyBinding = HotkeyBinding.load()
+    }
 
     /// Live, display-only preview text produced during recording. Never used for
     /// the final inserted text — that always comes from the main engine.
