@@ -22,10 +22,11 @@ The installer builds LocalFlow from source on your Mac (which is why macOS trust
 Gatekeeper warnings), installs it to /Applications, and launches it. Then:
 
 1. Grant the three permissions in the Setup window and click **Relaunch LocalFlow**.
-2. Your first dictation downloads the speech model (~1.6 GB, one-time). Wait for **Ready**
-   in the menu bar.
-3. Hold **Right Option** anywhere and talk. For the AI cleanup step (optional but nice),
-   install [Ollama](https://ollama.com) and run `ollama pull gemma3:4b`.
+2. The installer offers to set up **AI cleanup** for you (installs [Ollama](https://ollama.com)
+   and its `gemma3:4b` model, ~3.5 GB) — say yes, or skip it and add it any time later with
+   `ollama pull gemma3:4b`. Dictation works fine without it.
+3. Your first dictation downloads the speech model (~1.6 GB, one-time). Wait for **Ready**
+   in the menu bar, then hold **Right Option** anywhere and talk.
 
 **Updates are automatic.** The installer sets up a background agent that checks this repo
 every 6 hours and quietly rebuilds and swaps in new versions — settings and permissions

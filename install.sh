@@ -54,18 +54,69 @@ pkill -x LocalFlow 2>/dev/null || true
 rm -rf "$DEST/LocalFlow.app"
 ditto build/LocalFlow.app "$DEST/LocalFlow.app"
 
-# ── 6. Optional: Ollama for AI transcript cleanup ────────────────────────────
-if command -v ollama >/dev/null 2>&1; then
-  if ollama list 2>/dev/null | grep -q '^gemma3:4b'; then
-    echo "✓ Ollama with gemma3:4b found — AI cleanup is ready."
-  else
-    echo "Ollama found, but the cleanup model is missing. To enable AI cleanup run:"
-    echo "    ollama pull gemma3:4b"
+# ── 6. Ollama for AI transcript cleanup (auto-setup, opt-out) ────────────────
+OLLAMA_BIN="$(command -v ollama || true)"
+if [ -z "$OLLAMA_BIN" ] && [ -x "/Applications/Ollama.app/Contents/Resources/ollama" ]; then
+  OLLAMA_BIN="/Applications/Ollama.app/Contents/Resources/ollama"
+fi
+
+# Prompt on the real terminal — works under `curl | bash` (stdin is the pipe).
+# No terminal (unattended run) → return 1 so we never surprise-download.
+ask_yes() {
+  local reply
+  if [ -r /dev/tty ] && [ -w /dev/tty ]; then
+    printf '%s [Y/n] ' "$1" >/dev/tty
+    read -r reply </dev/tty || reply=""
+    case "$reply" in [Nn]*) return 1 ;; *) return 0 ;; esac
   fi
-else
-  bold "Optional: AI transcript cleanup (removes \"um\"s and false starts, fully on-device)."
-  echo "Dictation works fine without it — transcripts are just inserted as heard."
-  echo "To enable it: install Ollama from https://ollama.com then run:  ollama pull gemma3:4b"
+  return 1
+}
+
+wait_for_ollama() {
+  local i
+  for i in $(seq 1 30); do
+    "$OLLAMA_BIN" list >/dev/null 2>&1 && return 0
+    sleep 2
+  done
+  return 1
+}
+
+if [ -z "$OLLAMA_BIN" ]; then
+  bold "Optional: AI transcript cleanup — removes filler words and false starts, 100% on-device."
+  echo "Dictation works fine without it; transcripts are just inserted as heard."
+  if ask_yes "Install Ollama and the cleanup model now (~3.5 GB total, one-time)?"; then
+    if command -v brew >/dev/null 2>&1; then
+      bold "Installing Ollama via Homebrew…"
+      brew install ollama
+      brew services start ollama 2>/dev/null || { nohup ollama serve >/dev/null 2>&1 & }
+      OLLAMA_BIN="$(command -v ollama || true)"
+    else
+      bold "Downloading Ollama…"
+      OZIP="$(mktemp -d)/Ollama-darwin.zip"
+      curl -fL --progress-bar https://ollama.com/download/Ollama-darwin.zip -o "$OZIP"
+      ditto -x -k "$OZIP" /Applications
+      rm -f "$OZIP"
+      open -a /Applications/Ollama.app
+      echo "If Ollama shows a welcome window, click through it — it starts the local server."
+      OLLAMA_BIN="/Applications/Ollama.app/Contents/Resources/ollama"
+    fi
+  else
+    echo "Skipped. To enable later: install Ollama from https://ollama.com then run: ollama pull gemma3:4b"
+  fi
+fi
+
+if [ -n "$OLLAMA_BIN" ]; then
+  if wait_for_ollama; then
+    if "$OLLAMA_BIN" list 2>/dev/null | grep -q '^gemma3:4b'; then
+      echo "✓ Ollama with gemma3:4b found — AI cleanup is ready."
+    else
+      bold "Downloading the cleanup model (gemma3:4b, ~3.3 GB, one-time)…"
+      "$OLLAMA_BIN" pull gemma3:4b || \
+        echo "⚠️  Model download didn't finish — run 'ollama pull gemma3:4b' later. Dictation works without it."
+    fi
+  else
+    echo "⚠️  Ollama isn't responding yet. Once it's running, run: ollama pull gemma3:4b"
+  fi
 fi
 
 # ── 7. Auto-updates (background check every 6 h; silent rebuild + swap) ──────
