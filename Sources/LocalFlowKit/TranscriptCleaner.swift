@@ -102,7 +102,7 @@ public struct TranscriptCleaner: Sendable {
     /// placeholders untouched for the decoder to resolve. Deliberately forceful,
     /// with an example, because small models otherwise "clean" the tokens into
     /// punctuation.
-    public static let placeholderRule = "CRITICAL — PROTECTED TOKENS: the transcript may contain the literal control tokens \u{27E6}NL\u{27E7}, \u{27E6}PP\u{27E7}, \u{27E6}BP\u{27E7}, and \u{27E6}SCRATCH\u{27E7}. They are NOT words and NOT punctuation to fix — they are markers you must copy into your output byte-for-byte, unchanged, in the exact same position. Never delete them, never turn them into punctuation, colons, semicolons, or line breaks, never add or move them. Example: input \"buy milk \u{27E6}NL\u{27E7} buy eggs\" must become \"buy milk \u{27E6}NL\u{27E7} buy eggs\" (the token stays verbatim)."
+    public static let placeholderRule = "CRITICAL — PROTECTED TOKENS: the transcript may contain the literal control tokens \u{27E6}NL\u{27E7}, \u{27E6}PP\u{27E7}, and \u{27E6}BP\u{27E7}. They are NOT words and NOT punctuation to fix — they are markers you must copy into your output byte-for-byte, unchanged, in the exact same position. Never delete them, never turn them into punctuation, colons, semicolons, or line breaks, never add or move them. Example: input \"buy milk \u{27E6}NL\u{27E7} buy eggs\" must become \"buy milk \u{27E6}NL\u{27E7} buy eggs\" (the token stays verbatim)."
 
     /// Builds the effective system prompt for a dictation: the mode's base prompt
     /// plus, in order, the placeholder rule (when voice commands are on), a
@@ -260,7 +260,6 @@ public struct TranscriptCleaner: Sendable {
     static let placeholderTokens = [
         VoiceCommand.newLinePlaceholder,
         VoiceCommand.newParagraphPlaceholder,
-        VoiceCommand.scratchPlaceholder,
         VoiceCommand.bulletPlaceholder
     ]
 

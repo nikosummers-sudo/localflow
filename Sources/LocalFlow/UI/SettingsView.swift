@@ -189,7 +189,7 @@ private struct GeneralTab: View {
 
             Section("Voice commands") {
                 Toggle("Interpret spoken commands", isOn: $voiceCommandsEnabled)
-                Text("Say “new line” or “new paragraph” to insert breaks, or “scratch that” to retract your last sentence. Turn off to type those phrases literally.")
+                Text("Say “new line” or “new paragraph” to insert breaks, or “new bullet” to start a “- ” list line. Commands only ever insert — they never delete your words. Turn off to type those phrases literally.")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }

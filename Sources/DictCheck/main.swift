@@ -671,11 +671,11 @@ check("'new paragraph' becomes a blank-line break [\(show(pipeline("one new para
 check("trailing period on a command is tolerated [\(show(pipeline("add new line. then continue")))]",
       pipeline("add new line. then continue") == "add\nthen continue")
 
-check("'scratch that' retracts only the last sentence [\(show(pipeline("I like cats. I like dogs. scratch that")))]",
-      pipeline("I like cats. I like dogs. scratch that") == "I like cats.")
-
-check("'scratch that' mid-utterance retracts back to start [\(show(pipeline("Let's meet at 3pm scratch that let's meet at 4pm")))]",
-      pipeline("Let's meet at 3pm scratch that let's meet at 4pm") == "let's meet at 4pm")
+// NO retraction command: "scratch that" was removed after field testing (its
+// deletion scope depended on STT-chosen sentence boundaries). The phrase must
+// now pass through as ordinary content.
+check("'scratch that' is ordinary content, not a command [\(show(pipeline("I like dogs. scratch that")))]",
+      pipeline("I like dogs. scratch that").contains("scratch that"))
 
 // A command phrase embedded in a longer word must NOT trigger.
 check("'renew line' is not treated as a 'new line' command [\(show(pipeline("renew line")))]",
@@ -698,11 +698,10 @@ do {
 
 // The encoded placeholders themselves are the exact agreed tokens.
 do {
-    let encoded = encodeCommands("a new line b new paragraph c scratch that d new bullet e")
+    let encoded = encodeCommands("a new line b new paragraph c new bullet d")
     check("encode emits the exact placeholder tokens",
           encoded.contains(VoiceCommand.newLinePlaceholder)
               && encoded.contains(VoiceCommand.newParagraphPlaceholder)
-              && encoded.contains(VoiceCommand.scratchPlaceholder)
               && encoded.contains(VoiceCommand.bulletPlaceholder))
 }
 
@@ -722,27 +721,6 @@ do {
           encodeCommands(content) == content)
 }
 
-// Scratch tolerance — Whisper past-tenses the spoken command (field-reported:
-// "scratch that let me start again" transcribed as "scratched that let me
-// start again" and sailed through as content).
-do {
-    let S = VoiceCommand.scratchPlaceholder
-    check("'scratch that' fires",
-          encodeCommands("bad idea scratch that good idea").contains(S))
-    check("'scrap that' fires",
-          encodeCommands("bad idea scrap that good idea").contains(S))
-    check("past-tensed 'scratched that let me start again' fires (the field case)",
-          encodeCommands("the four AI scores that actually scratched that let me start again these look good").contains(S))
-    check("restart phrase is consumed with the command [\(show(encodeCommands("bad scratch that let me start again good")))]",
-          encodeCommands("bad scratch that let me start again good") == "bad \(S) good")
-    check("'we scratched that idea' as content is NOT a command",
-          !encodeCommands("we scratched that idea last week and moved on").contains(S))
-    // End-to-end: the retraction actually deletes the abandoned sentence.
-    let out = normalizeAfterCommands(decodeCommands(encodeCommands(
-        "hey these immediately look broken to me scratch that let me start again these look good to me")))
-    check("scratch retracts the abandoned run [\(show(out))]",
-          out == "these look good to me")
-}
 
 // MARK: - Newline-preserving normalization
 

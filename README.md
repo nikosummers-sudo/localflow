@@ -445,8 +445,8 @@ Menu bar → **Settings…**:
   onboarding, settings. ✅ Done.
 - **Phase 2 — Cleanup & live feedback.** Optional local LLM (Ollama, `gemma3:4b`) to tidy
   transcripts; live partial-transcription HUD. ✅ Done.
-- **Phase 3 — Power features.** Custom dictionary, voice commands ("new line", "scratch
-  that"), per-app modes, configurable shortcuts. ✅ Done.
+- **Phase 3 — Power features.** Custom dictionary, insert-only voice commands ("new
+  line", "new paragraph", "new bullet"), per-app modes, configurable shortcuts. ✅ Done.
 - **Phase 4 — Polish.** Streaming transcription, instant capture, Dock/menu-bar presence,
   auto-updates. ✅ Largely done — remaining ideas: raw-then-replace insertion, swappable
   Parakeet STT engine.

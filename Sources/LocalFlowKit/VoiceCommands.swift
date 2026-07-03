@@ -8,11 +8,15 @@ import Foundation
 public enum VoiceCommand {
     public static let newLinePlaceholder = "\u{27E6}NL\u{27E7}"        // ⟦NL⟧
     public static let newParagraphPlaceholder = "\u{27E6}PP\u{27E7}"   // ⟦PP⟧
-    public static let scratchPlaceholder = "\u{27E6}SCRATCH\u{27E7}"   // ⟦SCRATCH⟧
     public static let bulletPlaceholder = "\u{27E6}BP\u{27E7}"         // ⟦BP⟧
 }
 
-private let sentenceTerminators: Set<Character> = [".", "!", "?"]
+// NOTE: there is deliberately NO retraction command ("scratch that"). It was
+// built, field-tested, and REMOVED: its blast radius depends on sentence
+// boundaries the STT model chose (invisible to the speaker), so it sometimes
+// deleted more or less than intended — a destructive command with
+// unpredictable scope is worse than no command. The surviving commands are
+// insert-only: their worst failure is a visible stray line break.
 
 /// Replaces spoken command phrases in RAW transcript text with placeholder
 /// tokens. Matching is whole-word and case-insensitive, and tolerates a single
@@ -24,24 +28,6 @@ public func encodeCommands(_ text: String) -> String {
     // phrases do not overlap, so the result is the same either way.
     s = replacePhrase(s, phrase: "new paragraph", with: VoiceCommand.newParagraphPlaceholder)
     s = replacePhrase(s, phrase: "new line", with: VoiceCommand.newLinePlaceholder)
-    // Scratch tolerates how people (and Whisper) actually produce it:
-    //  - "scratch that" / "scrap that" — imperatives, unambiguous, fire always.
-    //  - "scratched/scrapped that" — Whisper routinely past-tenses the spoken
-    //    command (field-reported), but the past tense is also real content
-    //    ("we scratched that idea"), so it fires ONLY with an explicit restart
-    //    phrase attached.
-    //  - A trailing "let me start again/over" is command language, not content —
-    //    consumed along with the command in every variant.
-    s = replacePattern(
-        s,
-        pattern: "\\b(?:scratch|scrap) that\\b[.,]?(?:\\s+(?:so\\s+)?let me (?:start|try) (?:again|over)\\b[.,]?)?",
-        with: VoiceCommand.scratchPlaceholder
-    )
-    s = replacePattern(
-        s,
-        pattern: "\\b(?:scratched|scrapped) that\\b[.,]?\\s+(?:so\\s+)?let me (?:start|try) (?:again|over)\\b[.,]?",
-        with: VoiceCommand.scratchPlaceholder
-    )
     // Deterministic list formatting: "new bullet" starts a "- " line, exactly,
     // every time — no model judgment involved. Deliberately NOT "bullet point":
     // that phrase appears constantly in normal speech ("make a bullet point
@@ -53,12 +39,7 @@ public func encodeCommands(_ text: String) -> String {
 
 private func replacePhrase(_ text: String, phrase: String, with placeholder: String) -> String {
     let escaped = NSRegularExpression.escapedPattern(for: phrase)
-    return replacePattern(text, pattern: "\\b\(escaped)\\b[.,]?", with: placeholder)
-}
-
-/// Raw-regex variant for commands whose spoken/transcribed forms vary (tense,
-/// attached restart phrases). Case-insensitive, like `replacePhrase`.
-private func replacePattern(_ text: String, pattern: String, with placeholder: String) -> String {
+    let pattern = "\\b\(escaped)\\b[.,]?"
     guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { return text }
     let range = NSRange(text.startIndex..<text.endIndex, in: text)
     let template = NSRegularExpression.escapedTemplate(for: placeholder)
@@ -66,64 +47,12 @@ private func replacePattern(_ text: String, pattern: String, with placeholder: S
 }
 
 /// Turns placeholder tokens back into their real effect on the FINAL text.
-/// `scratch` is resolved first (it deletes the retracted sentence), then the
-/// newline placeholders are expanded. Pure and offline.
+/// All surviving commands are insert-only. Pure and offline.
 public func decodeCommands(_ text: String) -> String {
-    var result = applyScratch(text)
-    result = result.replacingOccurrences(of: VoiceCommand.newParagraphPlaceholder, with: "\n\n")
+    var result = text.replacingOccurrences(of: VoiceCommand.newParagraphPlaceholder, with: "\n\n")
     result = result.replacingOccurrences(of: VoiceCommand.newLinePlaceholder, with: "\n")
     result = result.replacingOccurrences(of: VoiceCommand.bulletPlaceholder, with: "\n- ")
-    // Any stray scratch token that survived (nothing to retract) is dropped.
-    result = result.replacingOccurrences(of: VoiceCommand.scratchPlaceholder, with: "")
     return result
-}
-
-/// Resolves every ⟦SCRATCH⟧: deletes everything from the placeholder back to the
-/// previous sentence terminator (. ! ?), or to the start of the text when there
-/// is none — i.e. retracts the last spoken sentence/aside. The terminator that
-/// ends the sentence BEFORE the retracted one is preserved.
-private func applyScratch(_ text: String) -> String {
-    var text = text
-    while let range = text.range(of: VoiceCommand.scratchPlaceholder) {
-        let before = String(text[..<range.lowerBound])
-        let cut = scratchCutIndex(in: before)
-        let head = String(before[..<cut])
-        let tail = String(text[range.upperBound...])
-        text = head + tail
-    }
-    return text
-}
-
-/// The index in `before` from which the retracted sentence starts. Skips trailing
-/// whitespace and the retracted sentence's OWN terminator, then finds the previous
-/// terminator and cuts just after it (keeping it). Returns startIndex when there
-/// is no earlier terminator.
-private func scratchCutIndex(in before: String) -> String.Index {
-    // Trim trailing whitespace.
-    var end = before.endIndex
-    while end > before.startIndex {
-        let prev = before.index(before: end)
-        if before[prev].isWhitespace { end = prev } else { break }
-    }
-    if end == before.startIndex { return before.startIndex }
-
-    // If the last non-space char is a terminator, it belongs to the retracted
-    // sentence — don't stop the search there.
-    var searchEnd = end
-    let lastCharIndex = before.index(before: end)
-    if sentenceTerminators.contains(before[lastCharIndex]) {
-        searchEnd = lastCharIndex
-    }
-
-    var i = searchEnd
-    while i > before.startIndex {
-        let prev = before.index(before: i)
-        if sentenceTerminators.contains(before[prev]) {
-            return before.index(after: prev)
-        }
-        i = prev
-    }
-    return before.startIndex
 }
 
 /// Collapses runs of spaces/tabs to a single space while PRESERVING newlines, and

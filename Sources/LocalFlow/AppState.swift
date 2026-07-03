@@ -24,8 +24,11 @@ private func instantCaptureEnabled() -> Bool {
     return UserDefaults.standard.bool(forKey: "instantCapture")
 }
 
-/// Whether spoken voice commands ("new line", "scratch that", …) are interpreted.
-/// Default on when the key has never been set.
+/// Whether spoken voice commands ("new line", "new paragraph", "new bullet") are
+/// interpreted. All commands are insert-only — the destructive "scratch that"
+/// was removed after field testing (its scope depended on STT-chosen sentence
+/// boundaries, invisible to the speaker). Default on when the key has never
+/// been set.
 func voiceCommandsEnabled() -> Bool {
     if UserDefaults.standard.object(forKey: "voiceCommandsEnabled") == nil { return true }
     return UserDefaults.standard.bool(forKey: "voiceCommandsEnabled")
@@ -1077,9 +1080,9 @@ final class AppState: ObservableObject {
     }
 
     /// Final text transformations shared by both pipelines, applied once to the
-    /// assembled transcript. Order matters: decode voice commands FIRST (so a
-    /// "scratch that" retraction happens before words are rewritten), tidy the
-    /// resulting newlines, then apply the dictionary's hard replacements.
+    /// assembled transcript: decode the insert-only voice commands into real
+    /// line breaks, tidy the resulting newlines, then apply the dictionary's
+    /// hard replacements.
     private func postProcess(_ raw: String) -> String {
         var text = raw
         if voiceCommandsEnabled() {
