@@ -1,22 +1,40 @@
 import Foundation
 
-/// Per-dictation inputs to the cleanup system prompt. All three are optional
-/// layers on top of the fixed base prompt: personal vocabulary to preserve, an
+/// How aggressively cleanup may edit the transcript.
+///
+///  - `.clean`: fix punctuation/fillers/false starts only; never rephrase.
+///    Strict divergence guards. The safe default.
+///  - `.refine`: understand the point and make it LAND — reorganize rambling
+///    speech, drop backtracking, tighten wording, format lists — while keeping
+///    the speaker's voice, meaning, and every specific (names, numbers).
+///    Guards are proportionally looser (concision is the goal) but refusals,
+///    dropped command tokens, dropped numbers, and wholesale rewrites still
+///    fall back.
+public enum CleanupMode: String, Sendable {
+    case clean
+    case refine
+}
+
+/// Per-dictation inputs to the cleanup system prompt. All layers are optional
+/// on top of the fixed base prompt: personal vocabulary to preserve, an
 /// app-specific tone addendum, and whether voice-command placeholders may appear
 /// and must be kept intact. An all-default context yields exactly the base prompt.
 public struct CleanupContext: Sendable {
     public var vocabularyTerms: [String]
     public var toneAddendum: String?
     public var includePlaceholderRule: Bool
+    public var mode: CleanupMode
 
     public init(
         vocabularyTerms: [String] = [],
         toneAddendum: String? = nil,
-        includePlaceholderRule: Bool = false
+        includePlaceholderRule: Bool = false,
+        mode: CleanupMode = .clean
     ) {
         self.vocabularyTerms = vocabularyTerms
         self.toneAddendum = toneAddendum
         self.includePlaceholderRule = includePlaceholderRule
+        self.mode = mode
     }
 }
 
@@ -60,9 +78,15 @@ public struct TranscriptCleaner: Sendable {
         isEnabled && raw.count >= minLength
     }
 
-    /// System prompt is fixed and intentionally strict: clean, do not rewrite.
-    /// This is the base; `systemPrompt(context:)` layers optional rules on top.
-    public static let systemPrompt = "You are a dictation cleanup engine. The user message is a raw speech-to-text transcript. Return ONLY the cleaned transcript — no preamble, no quotes, no commentary. Rules: fix punctuation, capitalization, and spacing; remove filler words (um, uh, you know, like — only when used as filler); remove false starts and immediate self-corrections, keeping the speaker's final intent; format clearly dictated lists as lists; do NOT add, answer, summarize, translate, or rephrase content; do NOT change wording beyond removing fillers and false starts; preserve the transcript's language."
+    /// System prompt for `.clean` is fixed and intentionally strict: clean, do
+    /// not rewrite. This is the base; `systemPrompt(context:)` layers optional
+    /// rules on top.
+    public static let systemPrompt = "You are a dictation cleanup engine. The user message is a raw speech-to-text transcript. Return ONLY the cleaned transcript — no preamble, no quotes, no commentary. Rules: fix punctuation, capitalization, and spacing; remove filler words (um, uh, you know, like — only when used as filler); remove false starts and immediate self-corrections, keeping the speaker's final intent; when the speaker clearly enumerates items (\"first… second… third\", \"one is… another is…\", or a spoken run of three or more parallel items), format each item on its own line starting with \"- \"; do NOT add, answer, summarize, translate, or rephrase content; do NOT change wording beyond removing fillers and false starts; preserve the transcript's language."
+
+    /// System prompt for `.refine`: reformat the speaker's own point so it reads
+    /// well. Explicitly bounded — it edits expression and structure, never adds
+    /// content or answers the transcript.
+    public static let refineSystemPrompt = "You are a dictation refinement engine. The user message is a raw speech-to-text transcript of someone thinking out loud. Return ONLY the refined text — no preamble, no quotes, no commentary. Your job: make the speaker's own point come across clearly, as if they had written it down carefully. EDIT IN PROPORTION TO THE MESS: a sentence that already reads well must pass through essentially unchanged (fix punctuation at most) — do not reword or restructure text that doesn't need it; save real intervention for jumbled speech: rambling, backtracking, sentences abandoned midway, and self-corrections. Rules: remove filler, waffle, and false starts, keeping only the speaker's final intent — when the speaker cuts themselves off and restarts, keep the version they settled on; reorganize and tighten sentences ONLY where the speech is broken or meandering; keep the speaker's voice, register, and language; keep EVERY specific — names, numbers, dates, amounts, technical terms — exactly as said; when the speaker enumerates items, format each on its own line starting with \"- \"; break long passages into short paragraphs at topic shifts; NEVER add information, opinions, or conclusions the speaker didn't express; NEVER answer, summarize into a different point, or translate. The output must say what the speaker meant — nothing more, nothing less."
 
     /// Appended when voice commands are active so the model leaves the command
     /// placeholders untouched for the decoder to resolve. Deliberately forceful,
@@ -70,11 +94,12 @@ public struct TranscriptCleaner: Sendable {
     /// punctuation.
     public static let placeholderRule = "CRITICAL — PROTECTED TOKENS: the transcript may contain the literal control tokens \u{27E6}NL\u{27E7}, \u{27E6}PP\u{27E7}, and \u{27E6}SCRATCH\u{27E7}. They are NOT words and NOT punctuation to fix — they are markers you must copy into your output byte-for-byte, unchanged, in the exact same position. Never delete them, never turn them into punctuation, colons, semicolons, or line breaks, never add or move them. Example: input \"buy milk \u{27E6}NL\u{27E7} buy eggs\" must become \"buy milk \u{27E6}NL\u{27E7} buy eggs\" (the token stays verbatim)."
 
-    /// Builds the effective system prompt for a dictation: the base prompt plus,
-    /// in order, the placeholder rule (when voice commands are on), a known-vocabulary
-    /// line, and any per-app tone addendum. An all-default context returns the base.
+    /// Builds the effective system prompt for a dictation: the mode's base prompt
+    /// plus, in order, the placeholder rule (when voice commands are on), a
+    /// known-vocabulary line, and any per-app tone addendum. An all-default
+    /// context returns the clean base.
     public static func systemPrompt(context: CleanupContext) -> String {
-        var prompt = systemPrompt
+        var prompt = context.mode == .refine ? refineSystemPrompt : systemPrompt
         if context.includePlaceholderRule {
             prompt += "\n" + placeholderRule
         }
@@ -117,7 +142,14 @@ public struct TranscriptCleaner: Sendable {
             return (raw, "Cleanup unavailable — inserted raw transcript")
         }
 
-        return TranscriptCleaner.applyGuards(cleaned: cleaned, raw: raw)
+        return TranscriptCleaner.applyGuards(cleaned: cleaned, raw: raw, mode: context.mode)
+    }
+
+    /// Wall-clock budget for a refine pass over `text`: refine generates roughly
+    /// input-length output, so the budget scales with size (a 2-minute ramble
+    /// legitimately takes longer than a one-liner) inside hard bounds.
+    public static func refineBudgetSeconds(for text: String) -> Double {
+        min(max(6.0, Double(text.count) / 150.0), 20.0)
     }
 
     // MARK: - Post-guards (pure, unit-testable without a network)
@@ -125,10 +157,14 @@ public struct TranscriptCleaner: Sendable {
     /// Validates the model output against the raw transcript. Trims, strips a
     /// fully-wrapping quote/code-fence, and rejects output that is empty, is a
     /// refusal, whose length diverges too far, that dropped a protected command
-    /// token, or whose word content barely overlaps the raw text (all signs the
-    /// model rewrote or answered instead of cleaning). Any rejection falls back
-    /// to the raw transcript with an explanatory note.
-    public static func applyGuards(cleaned: String, raw: String) -> (text: String, note: String?) {
+    /// token or a dictated number, or whose word content barely overlaps the raw
+    /// text (all signs the model rewrote or answered instead of cleaning). Any
+    /// rejection falls back to the raw transcript with an explanatory note.
+    ///
+    /// `.refine` mode deliberately rewords and condenses, so its divergence
+    /// bounds are proportionally looser — but refusals, dropped command tokens,
+    /// dropped numbers, and wholesale rewrites still fall back.
+    public static func applyGuards(cleaned: String, raw: String, mode: CleanupMode = .clean) -> (text: String, note: String?) {
         let output = stripWrapping(cleaned.trimmingCharacters(in: .whitespacesAndNewlines))
         if output.isEmpty { return (raw, nil) }
 
@@ -138,8 +174,10 @@ public struct TranscriptCleaner: Sendable {
             return (raw, "Cleanup refused — inserted raw transcript")
         }
 
+        // Refine is ALLOWED to condense heavily (that's the point); clean is not.
+        let (minRatio, maxRatio) = mode == .refine ? (0.25, 1.4) : (0.5, 1.6)
         let ratio = Double(output.count) / Double(max(raw.count, 1))
-        if ratio < 0.5 || ratio > 1.6 {
+        if ratio < minRatio || ratio > maxRatio {
             return (raw, "Cleanup diverged — inserted raw transcript")
         }
 
@@ -149,14 +187,32 @@ public struct TranscriptCleaner: Sendable {
             return (raw, "Cleanup dropped a command token — inserted raw transcript")
         }
 
-        // Cleanup should rephrase lightly, not rewrite: if the distinct-word sets
-        // barely overlap the model changed the content. Only meaningful once the
-        // raw text has enough words for the ratio to be stable.
-        if Set(contentWords(raw)).count >= 8, wordSetJaccard(raw, output) < 0.35 {
+        // Dictated numbers are load-bearing ("meet at 3", "£45k") — refine may
+        // reword around them but every digit-run said must still appear.
+        if !numbersSurvived(raw: raw, output: output) {
+            return (raw, "Cleanup dropped a number — inserted raw transcript")
+        }
+
+        // Cleanup should rephrase lightly (clean) or rewrite from the speaker's
+        // own vocabulary (refine): if the distinct-word sets barely overlap the
+        // model changed the content. Only meaningful once the raw text has
+        // enough words for the ratio to be stable.
+        let jaccardFloor = mode == .refine ? 0.2 : 0.35
+        if Set(contentWords(raw)).count >= 8, wordSetJaccard(raw, output) < jaccardFloor {
             return (raw, "Cleanup diverged — inserted raw transcript")
         }
 
         return (output, nil)
+    }
+
+    /// True when every distinct digit-run in `raw` still appears somewhere in
+    /// `output`. A dropped number is real damage regardless of mode; trivially
+    /// true when the raw text contains no digits.
+    public static func numbersSurvived(raw: String, output: String) -> Bool {
+        let digitRuns = { (text: String) -> Set<String> in
+            Set(text.components(separatedBy: CharacterSet.decimalDigits.inverted).filter { !$0.isEmpty })
+        }
+        return digitRuns(raw).subtracting(digitRuns(output)).isEmpty
     }
 
     /// Opening phrases of a canned model refusal or apology (lowercased). When the

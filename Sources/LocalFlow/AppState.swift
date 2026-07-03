@@ -731,14 +731,24 @@ final class AppState: ObservableObject {
         return TranscriptCleaner.isEnabled
     }
 
+    /// The user's chosen cleanup style. `.clean` (safe, default) fixes fillers
+    /// and punctuation; `.refine` reformats rambling speech so the point lands.
+    private func cleanupMode() -> CleanupMode {
+        CleanupMode(rawValue: UserDefaults.standard.string(forKey: "cleanupMode") ?? "") ?? .clean
+    }
+
     /// Builds the cleanup system-prompt context for this dictation: personal
-    /// vocabulary, the active app's tone addendum, and whether voice-command
-    /// placeholders must be preserved.
-    private func makeCleanupContext() -> CleanupContext {
+    /// vocabulary, the active app's tone addendum, whether voice-command
+    /// placeholders must be preserved, and the cleanup style. `forceCleanMode`
+    /// pins `.clean` for the streaming per-chunk cleaner — refining a 10-second
+    /// window in isolation would reformat fragments incoherently; refine only
+    /// makes sense over the full assembled text.
+    private func makeCleanupContext(forceCleanMode: Bool = false) -> CleanupContext {
         CleanupContext(
             vocabularyTerms: LocalFlowConfig.shared.currentTerms(),
             toneAddendum: currentAppRule()?.toneAddendum,
-            includePlaceholderRule: voiceCommandsEnabled()
+            includePlaceholderRule: voiceCommandsEnabled(),
+            mode: forceCleanMode ? .clean : cleanupMode()
         )
     }
 
@@ -759,7 +769,7 @@ final class AppState: ObservableObject {
             engine: engine,
             cleanupEnabled: effectiveCleanupEnabled(),
             voiceCommandsEnabled: voiceCommandsEnabled(),
-            cleanupContext: makeCleanupContext()
+            cleanupContext: makeCleanupContext(forceCleanMode: true)
         )
         liveSource = source
         incremental = transcriber
@@ -872,7 +882,32 @@ final class AppState: ObservableObject {
 
             if effectiveCleanupEnabled() { setStatus(.cleaning) }
             let result = await transcriber.assembleFinalText()
-            await finishInsertion(text: result.text, note: result.note)
+
+            // Refine mode: the chunks were cleaned conservatively while the user
+            // talked; now run ONE refine pass over the full assembled text so the
+            // reformatting sees the whole point. Falls back to the assembled text
+            // on any guard failure or timeout — never worse than clean mode.
+            var finalText = result.text
+            let note = result.note
+            if cleanupMode() == .refine, effectiveCleanupEnabled(),
+               finalText.count >= TranscriptCleaner.minLength {
+                setStatus(.cleaning)
+                let refined = await cleaner.clean(
+                    finalText,
+                    budgetSeconds: TranscriptCleaner.refineBudgetSeconds(for: finalText),
+                    context: makeCleanupContext()
+                )
+                EventLog.log("refine", [
+                    "path": "streaming",
+                    "result": refined.note == nil ? "ok" : "fallback",
+                    "chars": String(finalText.count),
+                ])
+                if refined.note == nil {
+                    finalText = refined.text
+                }
+            }
+            // Keep the assembled (pre-refine) text recoverable when refine changed it.
+            await finishInsertion(text: finalText, note: note, raw: finalText != result.text ? result.text : nil)
         }
     }
 
@@ -938,10 +973,19 @@ final class AppState: ObservableObject {
         var note: String?
         if effectiveCleanupEnabled(), raw.count >= TranscriptCleaner.minLength {
             setStatus(.cleaning)
-            let cleaned = await cleaner.clean(raw, context: makeCleanupContext())
+            let context = makeCleanupContext()
+            // Refine generates ~input-length output; give it a size-scaled budget.
+            let budget = context.mode == .refine
+                ? TranscriptCleaner.refineBudgetSeconds(for: raw)
+                : TranscriptCleaner.defaultTimeBudgetSeconds
+            let cleaned = await cleaner.clean(raw, budgetSeconds: budget, context: context)
             finalText = cleaned.text
             note = cleaned.note
-            EventLog.log("cleanup", ["path": "single-pass", "result": note == nil ? "ok" : "fallback"])
+            EventLog.log("cleanup", [
+                "path": "single-pass",
+                "mode": context.mode.rawValue,
+                "result": note == nil ? "ok" : "fallback",
+            ])
         }
 
         // Keep the pre-cleanup transcript when cleanup changed it: a bad cleanup
@@ -1068,6 +1112,20 @@ final class AppState: ObservableObject {
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
         pasteboard.setString(lastTranscript, forType: .string)
+    }
+
+    /// The clipboard content a dictation displaced without restoring (paste into
+    /// a non-text surface, or a rapid follow-up dictation). Surfaced in the menu
+    /// so "my copied link is gone" is recoverable with one click.
+    var displacedClipboard: String? { inserter.lastDisplacedClipboard }
+
+    /// Puts the displaced clipboard content back and confirms in the menu bar.
+    func restoreDisplacedClipboard() {
+        guard let displaced = displacedClipboard else { return }
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(displaced, forType: .string)
+        showNote("Previous clipboard restored")
     }
 
     /// One-click support bundle: zips the app + updater logs and version/OS info

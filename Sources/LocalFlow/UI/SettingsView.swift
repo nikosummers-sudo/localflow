@@ -124,6 +124,7 @@ private struct GeneralTab: View {
 
     @AppStorage("cleanupEnabled") private var cleanupEnabled = true
     @AppStorage("cleanupModel") private var cleanupModel = "gemma3:4b"
+    @AppStorage("cleanupMode") private var cleanupMode = "clean"
 
     @AppStorage("voiceCommandsEnabled") private var voiceCommandsEnabled = true
 
@@ -195,6 +196,17 @@ private struct GeneralTab: View {
 
             Section("AI Cleanup") {
                 Toggle("Clean up transcripts with AI (Ollama)", isOn: $cleanupEnabled)
+                Picker("Style", selection: $cleanupMode) {
+                    Text("Clean").tag("clean")
+                    Text("Refine").tag("refine")
+                }
+                .pickerStyle(.segmented)
+                .disabled(!cleanupEnabled)
+                Text(cleanupMode == "refine"
+                     ? "Refine reformats rambling speech so your point comes across — reorganizes, tightens, and bullets lists, keeping your voice and every name and number. Falls back to Clean if it strays. Long dictations take a few extra seconds."
+                     : "Clean fixes punctuation and removes fillers and false starts — never rewords. The safe default.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
                 TextField("Model", text: $cleanupModel)
                 Text("Runs locally via Ollama at localhost:11434. If the server is unavailable, LocalFlow inserts the raw transcript instead.")
                     .font(.caption)

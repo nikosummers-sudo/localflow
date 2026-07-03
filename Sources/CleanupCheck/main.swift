@@ -122,13 +122,26 @@ if args.contains("--placeholder") {
 }
 
 // MARK: - Live cleanup
+//
+//   CleanupCheck [--refine] ["some text…"]
+// --refine exercises the refine-mode prompt + guards (reformat rambling speech)
+// instead of the default conservative clean.
 
-let raw = args.isEmpty ? defaultSample : args.joined(separator: " ")
+var liveArgs = args
+let useRefine = liveArgs.contains("--refine")
+liveArgs.removeAll { $0 == "--refine" }
+
+let raw = liveArgs.isEmpty ? defaultSample : liveArgs.joined(separator: " ")
 
 let cleaner = TranscriptCleaner(client: OllamaClient())
+let liveContext = CleanupContext(mode: useRefine ? .refine : .clean)
+let liveBudget = useRefine
+    ? TranscriptCleaner.refineBudgetSeconds(for: raw)
+    : TranscriptCleaner.defaultTimeBudgetSeconds
 
+print("MODE: \(useRefine ? "refine" : "clean")")
 print("RAW: \(raw)")
-let result = await cleaner.clean(raw)
+let result = await cleaner.clean(raw, budgetSeconds: liveBudget, context: liveContext)
 print("CLEANED: \(result.text)")
 
 if let note = result.note {

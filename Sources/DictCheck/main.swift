@@ -537,6 +537,64 @@ if CommandLine.arguments.contains("--cleaner") {
               TC.applyGuards(cleaned: cleaned, raw: raw).text == cleaned)
     }
 
+    // 6) Refine mode: heavy condensing is ALLOWED (that's the point) — the same
+    //    output clean mode would reject on the length ratio passes in refine.
+    do {
+        let raw = "so um what i want to say is i think basically we should probably just go ahead "
+            + "and ship the new feature on friday because you know i think it's ready and um "
+            + "we've tested it quite a lot already so yeah let's ship the feature friday"
+        let refined = "I think we should ship the new feature on Friday — it's ready and well tested."
+        let ratio = Double(refined.count) / Double(raw.count)
+        check("refine condensing ratio is below clean's floor [\(String(format: "%.2f", ratio))]",
+              ratio < 0.5)
+        check("clean mode rejects heavy condensing",
+              TC.applyGuards(cleaned: refined, raw: raw, mode: .clean).text == raw)
+        check("refine mode accepts heavy condensing",
+              TC.applyGuards(cleaned: refined, raw: raw, mode: .refine).text == refined)
+    }
+
+    // 7) Refine still rejects a wholesale rewrite (near-zero overlap).
+    do {
+        let raw = "the quarterly sales figures exceeded our internal projections by a wide margin overall"
+        let rewrite = "remember to water the office plants every single morning without fail thanks"
+        check("refine mode still rejects wholesale rewrites",
+              TC.applyGuards(cleaned: rewrite, raw: raw, mode: .refine).text == raw)
+    }
+
+    // 8) Dropped numbers fall back in BOTH modes — digits are load-bearing.
+    do {
+        let raw = "let's meet at 3 pm in room 204 to review the 45 thousand pound proposal together"
+        let dropped = "Let's meet at 3 pm in room 204 to review the proposal together."
+        let kept = "Let's meet at 3 pm in room 204 to review the 45k proposal together."
+        check("numbersSurvived detects a dropped digit-run", !TC.numbersSurvived(raw: raw, output: dropped))
+        check("dropped number falls back to raw (refine)",
+              TC.applyGuards(cleaned: dropped, raw: raw, mode: .refine).text == raw)
+        check("all digit-runs present passes", TC.numbersSurvived(raw: raw, output: kept))
+        check("no digits anywhere passes trivially", TC.numbersSurvived(raw: "no numbers here", output: "none there either"))
+    }
+
+    // 9) Mode picks the right system prompt; both keep the placeholder rule.
+    do {
+        let refineCtx = CleanupContext(includePlaceholderRule: true, mode: .refine)
+        let cleanCtx = CleanupContext(includePlaceholderRule: true, mode: .clean)
+        check("refine context uses the refine prompt",
+              TC.systemPrompt(context: refineCtx).hasPrefix("You are a dictation refinement engine"))
+        check("clean context uses the clean prompt",
+              TC.systemPrompt(context: cleanCtx).hasPrefix("You are a dictation cleanup engine"))
+        check("refine prompt keeps the protected-token rule",
+              TC.systemPrompt(context: refineCtx).contains("PROTECTED TOKENS"))
+    }
+
+    // 10) Refine budget scales with input size inside hard bounds.
+    do {
+        check("short text gets the floor budget",
+              TC.refineBudgetSeconds(for: String(repeating: "a", count: 100)) == 6.0)
+        check("long text gets a scaled budget",
+              TC.refineBudgetSeconds(for: String(repeating: "a", count: 1_500)) == 10.0)
+        check("budget is capped at 20s",
+              TC.refineBudgetSeconds(for: String(repeating: "a", count: 100_000)) == 20.0)
+    }
+
     print(failures == 0 ? "CLEANER: OK" : "CLEANER: \(failures) FAILURE(S)")
     exit(failures == 0 ? 0 : 1)
 }

@@ -363,6 +363,19 @@ private struct HistoryRowView: View {
             }
             .help("Copy this dictation")
 
+            // Present only when AI cleanup changed the text: the words as actually
+            // spoken, recoverable in one click.
+            if let raw = record.raw, !raw.isEmpty {
+                Button {
+                    let pasteboard = NSPasteboard.general
+                    pasteboard.clearContents()
+                    pasteboard.setString(raw, forType: .string)
+                } label: {
+                    Image(systemName: "doc.on.doc.fill")
+                }
+                .help("Copy the original (what you said, before AI cleanup)")
+            }
+
             Button(action: onToggleCorrect) {
                 Image(systemName: "pencil")
                     .foregroundColor(isCorrecting ? Color.ttPurple500 : nil)

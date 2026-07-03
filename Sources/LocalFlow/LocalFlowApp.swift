@@ -43,6 +43,14 @@ struct LocalFlowApp: App {
             }
             .disabled(appState.lastTranscript.isEmpty)
 
+            // Only offered when a dictation actually displaced something — the
+            // "my copied link is gone" recovery.
+            if appState.displacedClipboard != nil {
+                Button("Restore Previous Clipboard") {
+                    appState.restoreDisplacedClipboard()
+                }
+            }
+
             Divider()
 
             Button("Setup & Permissions…") {
