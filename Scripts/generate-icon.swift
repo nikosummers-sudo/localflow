@@ -3,8 +3,8 @@
 //
 //   swift Scripts/generate-icon.swift
 //
-// Renders a 1024×1024 master (macOS-style rounded tile, indigo→slate gradient, a
-// centred white mic.fill with a soft shadow), fans it out to the standard iconset
+// Renders a 1024×1024 master (macOS-style rounded tile, a diagonal Triptease
+// orange→purple gradient, a centred white mic.fill with a soft shadow), fans it out
 // sizes with `sips`, then packs the .icns with `iconutil`. The committed .icns is
 // what the build bundles — this script only needs re-running when the art changes.
 
@@ -19,9 +19,13 @@ let tileMargin: CGFloat = 100       // transparent border around the rounded til
 let cornerRadius: CGFloat = 230     // squircle-ish corner radius of the tile
 let micHeightFraction: CGFloat = 0.46   // mic.fill height as a fraction of the canvas
 
-// Deep indigo → dark slate, top to bottom.
-let topColor = CGColor(red: 0x3A / 255, green: 0x3D / 255, blue: 0x8F / 255, alpha: 1)
-let bottomColor = CGColor(red: 0x23 / 255, green: 0x24 / 255, blue: 0x4F / 255, alpha: 1)
+// Triptease diagonal: orange-500 (top-leading) → a warm violet midpoint
+// (purple-400) → purple-600 (bottom-trailing). Kept rich, not muddy.
+// NOTE: these literals mirror BrandColors.swift — this standalone script can't
+// import the app module, so the palette is duplicated here by necessity.
+let gradientOrange500 = CGColor(red: 0xED / 255, green: 0x6E / 255, blue: 0x2E / 255, alpha: 1)
+let gradientVioletMid = CGColor(red: 0x8D / 255, green: 0x5C / 255, blue: 0xF2 / 255, alpha: 1)
+let gradientPurple600 = CGColor(red: 0x44 / 255, green: 0x31 / 255, blue: 0x8D / 255, alpha: 1)
 
 // MARK: - Paths
 
@@ -103,14 +107,16 @@ ctx.addPath(tilePath)
 ctx.clip()
 guard let gradient = CGGradient(
     colorsSpace: CGColorSpaceCreateDeviceRGB(),
-    colors: [topColor, bottomColor] as CFArray,
-    locations: [0, 1]
+    colors: [gradientOrange500, gradientVioletMid, gradientPurple600] as CFArray,
+    locations: [0, 0.5, 1]
 ) else { fail("could not build gradient") }
-// Origin is bottom-left, so the top of the tile is the high-y end.
+// Diagonal, top-leading → bottom-trailing. Origin is bottom-left, so top-leading
+// is (0, canvas) and bottom-trailing is (canvas, 0). Extend past the endpoints so
+// the tile corners never leave a hairline of the clamped end colour.
 ctx.drawLinearGradient(gradient,
                        start: CGPoint(x: 0, y: canvas),
-                       end: CGPoint(x: 0, y: 0),
-                       options: [])
+                       end: CGPoint(x: canvas, y: 0),
+                       options: [.drawsBeforeStartLocation, .drawsAfterEndLocation])
 ctx.restoreGState()
 
 // Centred white mic.fill with a soft shadow.

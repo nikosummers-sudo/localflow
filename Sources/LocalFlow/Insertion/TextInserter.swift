@@ -21,14 +21,16 @@ final class TextInserter {
     private typealias PasteboardSnapshot = [[String: Data]]
 
     @discardableResult
-    func insert(_ text: String, restoreClipboard: Bool) async -> Result {
+    func insert(_ text: String, restoreClipboard: Bool, forcePaste: Bool = false) async -> Result {
         let pasteboard = NSPasteboard.general
 
         // When we can inspect the focus and it is positively NOT a text field,
         // don't blast Cmd+V into something that can't take it. Leave the
         // transcript on the clipboard (and do NOT restore) so it survives for a
         // manual paste. Anything ambiguous falls through to the normal paste.
-        if AXIsProcessTrusted(), FocusInspector.classifyFocusedElement() == .notEditable {
+        // `forcePaste` (a per-app rule) skips detection entirely — for apps
+        // whose inputs hide from accessibility.
+        if !forcePaste, AXIsProcessTrusted(), FocusInspector.classifyFocusedElement() == .notEditable {
             pasteboard.clearContents()
             pasteboard.setString(text, forType: .string)
             return .noInputField

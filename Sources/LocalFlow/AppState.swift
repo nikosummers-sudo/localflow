@@ -63,13 +63,16 @@ final class AppState: ObservableObject {
             }
         }
 
+        /// Menu-bar glyph. A waveform identity (not a mic) so it never reads as
+        /// macOS's own microphone-in-use indicator. These render as template
+        /// (monochrome) images — the menu bar owns their colour, so we don't tint.
         var symbolName: String {
             switch self {
-            case .idle: return "mic"
-            case .recording: return "mic.fill"
-            case .recordingLocked: return "mic.badge.plus"
+            case .idle: return "waveform.circle"
+            case .recording: return "waveform.circle.fill"
+            case .recordingLocked: return "lock.circle.fill"
             case .loadingModel: return "arrow.down.circle"
-            case .transcribing: return "waveform"
+            case .transcribing: return "ellipsis.circle"
             case .cleaning: return "wand.and.stars"
             case .pasting: return "doc.on.clipboard"
             case .noInputField: return "doc.on.clipboard"
@@ -129,6 +132,21 @@ final class AppState: ObservableObject {
     /// Fed from the recorder's audio-thread callback (throttled ~15 Hz).
     @Published var audioLevel: Float = 0
 
+    /// True while recording once ~3 s have elapsed with NO audio above the speech
+    /// level — drives the HUD's "Can't hear you" hint. Reverts the instant speech
+    /// is detected. Meaningless (always false) outside a recording.
+    @Published private(set) var showNoAudioHint: Bool = false
+
+    /// Invoked when a dictation attempt is blocked because the Microphone
+    /// permission is denied — asks the app to open the Setup window so the user can
+    /// fix it. Wired by AppDelegate (which owns the windows) at launch.
+    var onNeedsMicrophoneSetup: (() -> Void)?
+
+    /// Shown (single-pass and streaming) when a recording contained no audible
+    /// speech — the true-silence case behind the "it only typed 'you'" reports.
+    private let silenceMessage =
+        "Couldn't hear you — check your mic input (System Settings → Sound → Input) and the pill's bars while you speak"
+
     /// The final text of the most recent dictation (post-cleanup), retained so
     /// the user can always re-copy it — the "Copy Last Transcript" safety net.
     @Published private(set) var lastTranscript: String = ""
@@ -174,16 +192,40 @@ final class AppState: ObservableObject {
     private var errorResetTask: Task<Void, Never>?
     private var autoStopTask: Task<Void, Never>?
 
+    /// Whether any frame above the speech level has arrived during THIS dictation.
+    /// Cheaply updated from the throttled `onLevel` stream; drives the live hint.
+    private var heardAudioThisDictation = false
+    private var noAudioHintTask: Task<Void, Never>?
+    /// How long to wait after start before showing the "Can't hear you" hint.
+    private let noAudioHintDelay: TimeInterval = 3.0
+    /// Normalized (0–1) `audioLevel` above which real input is considered present.
+    /// ≈0.15 maps to ~0.0075 linear RMS through the recorder's -50…0 dB window —
+    /// just above `AudioGate.speechThreshold` (0.006), so ambient noise won't clear
+    /// the hint but a real voice will.
+    private let audioHeardLevel: Float = 0.15
+
+    /// Last-seen Microphone-permission grant, to detect a false→true transition.
+    /// A grant that lands while the audio engine is already running leaves that
+    /// engine feeding pre-grant silence until it's rebuilt — the case FIX 5 heals.
+    private var lastKnownMicGranted = false
+    /// Set when a mic grant is detected mid-dictation; the engine restart is then
+    /// deferred to the next `stopDictation` so a live capture isn't disturbed.
+    private var pendingMicRestart = false
+
     private let minRecordingSeconds: TimeInterval = 0.3
     // Streaming makes long recordings cheap, so the hands-free limit is generous.
     private let maxRecordingSeconds: TimeInterval = 600
 
     private init() {
+        AppState.seedDefaultAppRules()
         engine = SerialTranscriptionEngine(engine: WhisperKitEngine(model: configuredModelName()))
+        // Seed the transition tracker with the launch-time grant so a returning
+        // (already-granted) user never triggers a spurious engine restart.
+        lastKnownMicGranted = PermissionsManager.shared.microphoneGranted
         // The recorder invokes this from the audio tap thread; hop to the main
         // actor to publish so the HUD's @Published binding stays valid.
         recorder.onLevel = { [weak self] level in
-            Task { @MainActor in self?.audioLevel = level }
+            Task { @MainActor in self?.updateAudioLevel(level) }
         }
         observeForegroundApp()
     }
@@ -236,22 +278,53 @@ final class AppState: ObservableObject {
         Task { await preloadEngine() }
     }
 
+    /// Whether the configured model's files already exist on disk — a cached
+    /// model loads in well under 90s, so a longer wait means the load is hung,
+    /// not slow. (Heuristic path; WhisperKit's layout, verified from source.)
+    private func modelLikelyCached() -> Bool {
+        let folder = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Documents/huggingface/models/argmaxinc/whisperkit-coreml/openai_whisper-\(configuredModelName())")
+        return FileManager.default.fileExists(atPath: folder.path)
+    }
+
     /// Shows the honest loading status until the main engine is ready, then flips
-    /// to .transcribing. On first run the model download can take minutes; without
-    /// this a finished dictation would sit on "Transcribing…" the whole time and
-    /// look hung. When the engine is already loaded this is a cheap no-op that just
-    /// sets .transcribing.
-    private func ensureReadyThenTranscribing() async {
+    /// to .transcribing and returns true. The wait is BOUNDED: a launch-time load
+    /// that hung (e.g. a stalled network check inside WhisperKit) would otherwise
+    /// wedge the serial engine chain forever, silently eating every dictation.
+    /// On timeout or failure this surfaces an error, abandons the wedged chain
+    /// for a fresh engine (reloadEngine), and returns false so the caller bails.
+    private func ensureReadyThenTranscribing() async -> Bool {
         if await engine.isReady {
             setStatus(.transcribing)
-            return
+            return true
         }
         setStatus(.loadingModel(engineHasLoadedOnce ? nil : "Downloading speech model… (first run)"))
-        // preload() is idempotent and serialized: this waits for the in-flight
-        // first-run load (or starts one) and returns once the model is ready.
-        try? await engine.preload()
-        engineHasLoadedOnce = true
-        setStatus(.transcribing)
+        let budget: Double = modelLikelyCached() ? 90 : 900  // download runs need real time
+        let engineRef = engine
+        let raceWon = await withTaskGroup(of: Bool.self) { group in
+            group.addTask { (try? await engineRef.preload()) != nil }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: UInt64(budget * 1_000_000_000))
+                return false
+            }
+            let first = await group.next() ?? false
+            group.cancelAll()  // stops the WAIT; a hung preload itself isn't cancellable
+            return first
+        }
+        if raceWon, await engine.isReady {
+            engineHasLoadedOnce = true
+            EventLog.log("model.load", ["result": "ok"])
+            setStatus(.transcribing)
+            return true
+        }
+        EventLog.log("model.load", [
+            "result": raceWon ? "failed" : "timeout",
+            "budgetS": String(Int(budget)),
+        ])
+        setStatus(.error("Speech model didn't load — retrying with a fresh engine. Dictate again in a moment."))
+        // The old chain (and anything hung inside it) is abandoned, not repaired.
+        reloadEngine()
+        return false
     }
 
     // MARK: - Instant capture (keeps the mic warm)
@@ -271,6 +344,46 @@ final class AppState: ObservableObject {
             }
         } else if recorder.isCapturing {
             recorder.stopContinuousCapture()
+        }
+    }
+
+    /// Reacts to a Microphone-permission change (called from every permission hook:
+    /// onboarding's poll, and the in-dictation request prompt). On a false→true
+    /// transition the audio engine — if it was already running — is still feeding
+    /// pre-grant silence, so we rebuild it against the now-granted mic. Idempotent:
+    /// a non-transition (e.g. an Input-Monitoring grant that also fires this) just
+    /// reconciles capture to the current state, exactly as before.
+    func handleMicrophonePermissionChange() {
+        let granted = PermissionsManager.shared.microphoneGranted
+        let transitionedToGranted = granted && !lastKnownMicGranted
+        lastKnownMicGranted = granted
+
+        guard transitionedToGranted else {
+            refreshContinuousCapture()
+            return
+        }
+        // Don't rebuild under a live dictation — defer to the next stop. (Under the
+        // start-time mic gate this is nearly unreachable, but it keeps the restart
+        // unconditionally safe.)
+        if status.isRecording {
+            pendingMicRestart = true
+            return
+        }
+        restartCaptureAfterGrant()
+    }
+
+    /// Rebuilds capture with a fresh engine after a mic grant. If capture is already
+    /// running it's the stale, silence-delivering engine → tear down and restart it;
+    /// if it isn't running (the usual case, since capture is gated on the grant),
+    /// start it fresh now. A no-op when instant capture is off — legacy per-dictation
+    /// capture then starts its own fresh engine on the next press, post-grant.
+    private func restartCaptureAfterGrant() {
+        if recorder.isCapturing {
+            // recorder.restartContinuousCapture logs its own engine.restart outcome.
+            try? recorder.restartContinuousCapture()
+        } else {
+            EventLog.log("engine.restart", ["reason": "mic-grant", "result": "fresh-start"])
+            refreshContinuousCapture()
         }
     }
 
@@ -392,15 +505,53 @@ final class AppState: ObservableObject {
         default:
             break
         }
+
+        // Microphone-permission gate. A denied or not-yet-granted mic doesn't
+        // error on macOS — it feeds zeros — so without this we'd "record" silence
+        // and let Whisper hallucinate "you"/"Thank you." from it. Refuse to record
+        // until the mic is actually granted.
+        switch PermissionsManager.shared.microphoneStatus {
+        case .notDetermined:
+            // Trigger the system prompt, but don't record this attempt — capture
+            // would be silent until the user answers. On grant this routes through
+            // the transition handler, which starts capture with a FRESH engine so
+            // the just-granted mic delivers real audio (not pre-grant silence).
+            PermissionsManager.shared.requestMicrophone { [weak self] _ in
+                Task { @MainActor in self?.handleMicrophonePermissionChange() }
+            }
+            EventLog.log("permission.blocked", ["permission": "microphone", "status": "notDetermined"])
+            setStatus(.error("Grant Microphone access, then try again"))
+            return
+        case .denied:
+            EventLog.log("permission.blocked", ["permission": "microphone", "status": "denied"])
+            setStatus(.error("Microphone permission is off — enable it in the Setup window"))
+            onNeedsMicrophoneSetup?()
+            return
+        case .granted:
+            break
+        }
+
         do {
             try recorder.beginRecording()
             captureActiveApp()
             partialText = ""
             setStatus(.recording)
             startAutoStop()
+            startNoAudioHint()
             startPartials()
             startStreaming()
+
+            // Diagnostics only (no transcript content): the input mode and the mic
+            // the OS handed us. A wrong/unexpected device or sample rate here is a
+            // strong tell for the "it only heard silence" reports.
+            let input = recorder.inputDescription()
+            EventLog.log("dictation.start", [
+                "mode": hotkeyBinding.isHold ? "hold" : "toggle",
+                "device": input.deviceName ?? "unknown",
+                "inputHz": String(format: "%.0f", input.sampleRate),
+            ])
         } catch {
+            EventLog.log("dictation.start", ["result": "error", "error": String(describing: error)])
             setStatus(.error(error.localizedDescription))
         }
     }
@@ -415,6 +566,21 @@ final class AppState: ObservableObject {
     }
 
     // MARK: - Per-app rules & cleanup context
+
+    /// One-time seeding of rules for apps known to hide their inputs from
+    /// macOS accessibility. Runs once ever (flagged), so a user who deletes
+    /// the seeded rule doesn't get it back on every launch.
+    static func seedDefaultAppRules() {
+        let flag = "seededClaudeInsertionRule"
+        guard !UserDefaults.standard.bool(forKey: flag) else { return }
+        UserDefaults.standard.set(true, forKey: flag)
+        let claudeID = "com.anthropic.claudefordesktop"
+        guard LocalFlowConfig.shared.rule(forBundleID: claudeID) == nil else { return }
+        var rules = LocalFlowConfig.shared.appRules
+        rules.append(AppRule(bundleID: claudeID, appName: "Claude", insertionMode: "paste"))
+        LocalFlowConfig.shared.appRules = rules
+        EventLog.log("apps.seeded", ["bundle": claudeID, "insertion": "paste"])
+    }
 
     private func currentAppRule() -> AppRule? {
         guard let id = activeAppBundleID else { return nil }
@@ -443,6 +609,7 @@ final class AppState: ObservableObject {
     /// recorder and auto-stop timer are untouched — only the surfaced status changes.
     func lockDictation() {
         guard status == .recording else { return }
+        EventLog.log("dictation.lock")
         setStatus(.recordingLocked)
     }
 
@@ -470,6 +637,22 @@ final class AppState: ObservableObject {
         let finalSamples = recorder.endRecording()
         let duration = Double(finalSamples.count) / AudioRecorder.targetSampleRate
         lastRecordingDuration = duration
+
+        // Diagnostics: peak input level over the whole recording is the single most
+        // telling number for a silence report (0 → the mic delivered nothing).
+        EventLog.log("dictation.stop", [
+            "durationS": String(format: "%.2f", duration),
+            "samples": String(finalSamples.count),
+            "maxRMS": String(format: "%.4f", AudioGate.maxFrameRMS(finalSamples, sampleRate: AudioRecorder.targetSampleRate)),
+        ])
+
+        // A mic grant that landed mid-dictation deferred its engine rebuild to here
+        // (this recording used the pre-grant engine, so it may be silent — the
+        // silence guard covers that — but the NEXT one must use a fresh engine).
+        if pendingMicRestart {
+            pendingMicRestart = false
+            restartCaptureAfterGrant()
+        }
 
         // Detach the streaming handles for this dictation.
         let source = liveSource
@@ -506,8 +689,13 @@ final class AppState: ObservableObject {
             _ = await supervisor?.value
 
             // Never show "Transcribing…" while the model is still loading: surface
-            // the loading status and wait for the engine to be ready first.
-            await ensureReadyThenTranscribing()
+            // the loading status and wait (bounded) for the engine to be ready.
+            // A hung load self-heals via a fresh engine; this dictation is lost
+            // but the error says so and the next one works.
+            guard await ensureReadyThenTranscribing() else {
+                partialText = ""
+                return
+            }
 
             guard let transcriber, let source else {
                 await runTranscription(finalSamples)
@@ -525,6 +713,17 @@ final class AppState: ObservableObject {
             // Streaming path: only the short tail is left to transcribe + clean.
             source.finalize(with: finalSamples)
             await transcriber.transcribeTail(source: source)
+
+            // Silence guard: if not one chunk or the tail cleared the speech gate,
+            // the whole recording was silent (denied/muted/wrong mic). Surface the
+            // hint instead of inserting nothing — matches the single-pass path.
+            guard await transcriber.heardSpeech else {
+                EventLog.log("silence.blocked", ["path": "streaming"])
+                partialText = ""
+                setStatus(.error(silenceMessage))
+                return
+            }
+
             if effectiveCleanupEnabled() { setStatus(.cleaning) }
             let result = await transcriber.assembleFinalText()
             await finishInsertion(text: result.text, note: result.note)
@@ -535,6 +734,19 @@ final class AppState: ObservableObject {
     /// cleanup, then insertion. Used for short dictations and when streaming
     /// wasn't active.
     private func runTranscription(_ samples: [Float]) async {
+        // Single-pass silence guard (both single-pass entry points route here).
+        // A recording with no audible speech is the true-silence case behind the
+        // "it only typed 'you'" reports: don't transcribe it, don't insert, don't
+        // record history — tell the user their mic delivered nothing instead.
+        guard AudioGate.containsSpeech(samples) else {
+            EventLog.log("silence.blocked", [
+                "path": "single-pass",
+                "maxRMS": String(format: "%.4f", AudioGate.maxFrameRMS(samples, sampleRate: AudioRecorder.targetSampleRate)),
+            ])
+            partialText = ""
+            setStatus(.error(silenceMessage))
+            return
+        }
         do {
             let sttText = try await engine.transcribe(samples: samples)
             guard !sttText.isEmpty else {
@@ -555,10 +767,12 @@ final class AppState: ObservableObject {
                 let cleaned = await cleaner.clean(raw, context: makeCleanupContext())
                 finalText = cleaned.text
                 note = cleaned.note
+                EventLog.log("cleanup", ["path": "single-pass", "result": note == nil ? "ok" : "fallback"])
             }
 
             await finishInsertion(text: finalText, note: note)
         } catch {
+            EventLog.log("stt.failed", ["path": "single-pass", "error": String(describing: error)])
             partialText = ""
             setStatus(.error(error.localizedDescription))
         }
@@ -573,7 +787,15 @@ final class AppState: ObservableObject {
 
         guard !text.isEmpty else {
             partialText = ""
-            setStatus(.idle)
+            // Empty final text: normally a benign no-op (nothing intelligible), but
+            // if a note came through (e.g. every voiced chunk failed STT) surface it
+            // so the failure never vanishes silently.
+            if let note {
+                EventLog.log("insert.empty", ["note": "1"])
+                setStatus(.error(note))
+            } else {
+                setStatus(.idle)
+            }
             return
         }
 
@@ -585,8 +807,24 @@ final class AppState: ObservableObject {
         appendHistory(text: text)
 
         setStatus(.pasting)
-        let result = await inserter.insert(text, restoreClipboard: restoreClipboardEnabled())
+        // Per-app insertion override: apps whose inputs hide from accessibility
+        // (some Electron apps) can be set to always paste, skipping detection.
+        let insertBundleID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+        let forcePaste = insertBundleID
+            .flatMap { LocalFlowConfig.shared.rule(forBundleID: $0) }?.alwaysPaste ?? false
+        if forcePaste, let insertBundleID {
+            EventLog.log("insert.forcedPaste", ["bundle": insertBundleID])
+        }
+        let result = await inserter.insert(
+            text, restoreClipboard: restoreClipboardEnabled(), forcePaste: forcePaste
+        )
         partialText = ""
+        // Character count only — never the inserted text itself.
+        EventLog.log("insert", [
+            "result": String(describing: result),
+            "chars": String(text.count),
+            "note": note == nil ? "0" : "1",
+        ])
         switch result {
         case .pasted:
             // Insert first; then, if cleanup fell back, surface the note in the
@@ -654,6 +892,34 @@ final class AppState: ObservableObject {
 
     // MARK: - Helpers
 
+    /// Publishes the live mic level and, cheaply off the same stream, records
+    /// whether real input has been heard this dictation — clearing the "Can't hear
+    /// you" hint the moment a voice comes through.
+    private func updateAudioLevel(_ level: Float) {
+        audioLevel = level
+        guard level >= audioHeardLevel else { return }
+        heardAudioThisDictation = true
+        if showNoAudioHint { showNoAudioHint = false }
+    }
+
+    /// Arms the live "Can't hear you" hint for a fresh dictation: resets the
+    /// heard-audio flag and, after `noAudioHintDelay`, shows the hint if still
+    /// recording and nothing audible has arrived. Cancelled/reset on every stop via
+    /// `setStatus`, so it's safe across rapid start/stop.
+    private func startNoAudioHint() {
+        heardAudioThisDictation = false
+        showNoAudioHint = false
+        noAudioHintTask?.cancel()
+        noAudioHintTask = Task { [weak self] in
+            let delay = self?.noAudioHintDelay ?? 3.0
+            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            guard let self, !Task.isCancelled else { return }
+            if self.status.isRecording && !self.heardAudioThisDictation {
+                self.showNoAudioHint = true
+            }
+        }
+    }
+
     private func startAutoStop() {
         autoStopTask?.cancel()
         let limit = maxRecordingSeconds
@@ -667,10 +933,15 @@ final class AppState: ObservableObject {
     private func setStatus(_ newStatus: Status) {
         status = newStatus
 
-        // The voice animation is only meaningful while capturing; settle it to
-        // quiet on every other transition.
+        // The voice animation and the "Can't hear you" hint are only meaningful
+        // while capturing; settle both on every other transition. (A .recording →
+        // .recordingLocked change is still "recording", so the in-flight hint timer
+        // survives locking.)
         if newStatus != .recording && newStatus != .recordingLocked {
             audioLevel = 0
+            showNoAudioHint = false
+            noAudioHintTask?.cancel()
+            noAudioHintTask = nil
         }
 
         errorResetTask?.cancel()

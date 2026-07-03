@@ -35,6 +35,7 @@ struct MainWindowView: View {
             footer
         }
         .frame(minWidth: 560, minHeight: 400)
+        .tint(Color.ttPurple500)
         .onAppear(perform: reload)
         .onChange(of: appState.historyRevision) { _, _ in reload() }
     }
@@ -139,22 +140,75 @@ struct MainWindowView: View {
         }
     }
 
+    @ViewBuilder
     private var emptyState: some View {
+        if search.isEmpty {
+            gettingStartedPanel
+        } else {
+            noResultsState
+        }
+    }
+
+    /// First-run guide shown when no dictations exist yet: the binding-aware
+    /// gesture, hands-free (hold bindings only), and the fix-a-word learning loop.
+    private var gettingStartedPanel: some View {
+        let binding = appState.hotkeyBinding
+        return VStack(spacing: 16) {
+            Spacer()
+            VStack(spacing: 6) {
+                Image(systemName: "text.bubble")
+                    .font(.system(size: 34))
+                    .foregroundColor(.secondary)
+                Text("Getting started")
+                    .font(.headline)
+                    .foregroundColor(.secondary)
+            }
+            VStack(alignment: .leading, spacing: 12) {
+                miniGuideRow(icon: "mic.fill", detail: binding.guideDictateLine)
+                if binding.isHold {
+                    miniGuideRow(icon: "lock.fill", detail: binding.guideHandsFreeLine)
+                }
+                miniGuideRow(
+                    icon: "graduationcap.fill",
+                    detail: "Fix a misheard word right here — hover a dictation, hit the pencil, click the word and correct it, and LocalFlow won't get it wrong again.",
+                    tint: .ttOrange500
+                )
+            }
+            .frame(maxWidth: 420)
+            Text("Your dictations will be listed here — copy, fix, or delete any of them.")
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 420)
+            Spacer()
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding()
+    }
+
+    private func miniGuideRow(icon: String, detail: String, tint: Color = .ttPurple500) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: icon)
+                .foregroundColor(tint)
+                .font(.body)
+                .frame(width: 22, alignment: .center)
+            Text(detail)
+                .font(.subheadline)
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
+        }
+    }
+
+    private var noResultsState: some View {
         VStack(spacing: 8) {
             Spacer()
-            Image(systemName: search.isEmpty ? "text.bubble" : "magnifyingglass")
+            Image(systemName: "magnifyingglass")
                 .font(.system(size: 34))
                 .foregroundColor(.secondary)
-            Text(search.isEmpty ? "Your dictations will appear here" : "No dictations match your search")
+            Text("No dictations match your search")
                 .font(.headline)
                 .foregroundColor(.secondary)
-            if search.isEmpty {
-                Text("Start dictating with your shortcut and each result is saved here — ready to re-copy or correct.")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                    .multilineTextAlignment(.center)
-                    .frame(maxWidth: 360)
-            }
             Spacer()
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -311,7 +365,7 @@ private struct HistoryRowView: View {
 
             Button(action: onToggleCorrect) {
                 Image(systemName: "pencil")
-                    .foregroundColor(isCorrecting ? .accentColor : nil)
+                    .foregroundColor(isCorrecting ? Color.ttPurple500 : nil)
             }
             .help(isCorrecting ? "Done correcting" : "Fix words")
 
@@ -362,11 +416,11 @@ private struct HistoryRowView: View {
             .padding(.vertical, 3)
             .background(
                 RoundedRectangle(cornerRadius: 5)
-                    .fill(selected ? Color.accentColor.opacity(0.25) : Color.secondary.opacity(0.12))
+                    .fill(selected ? Color.ttPurple500.opacity(0.25) : Color.secondary.opacity(0.12))
             )
             .overlay(
                 RoundedRectangle(cornerRadius: 5)
-                    .stroke(selected ? Color.accentColor : Color.clear, lineWidth: 1)
+                    .stroke(selected ? Color.ttPurple500 : Color.clear, lineWidth: 1)
             )
             .contentShape(Rectangle())
             .onTapGesture { handleTap(index) }

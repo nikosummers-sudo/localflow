@@ -221,6 +221,21 @@ extension HotkeyBinding {
         return "Press \(keysLabel) to start dictating, then press \(keysLabel) again to finish."
     }
 
+    /// First-run guide line for "Dictate anywhere". Binding-aware; the caller
+    /// supplies the surrounding title.
+    public var guideDictateLine: String {
+        if isHold {
+            return "Hold \(keysLabel), speak, release — your words appear at the cursor."
+        }
+        return "Press \(keysLabel) to start, speak, press it again to finish."
+    }
+
+    /// First-run guide line for "Go hands-free". Only meaningful for hold
+    /// bindings (combo bindings are already hands-free).
+    public var guideHandsFreeLine: String {
+        "Tap Space while holding to lock recording; tap \(keysLabel) to finish."
+    }
+
     /// The menu status text while a hands-free recording is in progress.
     public var lockedStatusText: String {
         if isHold {

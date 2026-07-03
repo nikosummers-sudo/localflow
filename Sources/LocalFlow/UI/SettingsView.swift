@@ -95,6 +95,7 @@ struct SettingsView: View {
                 .tabItem { Label("Apps", systemImage: "app.badge") }
         }
         .frame(width: 520, height: 640)
+        .tint(Color.ttPurple500)
     }
 }
 
@@ -324,6 +325,17 @@ private struct AppsTab: View {
                     .pickerStyle(.segmented)
 
                     VStack(alignment: .leading, spacing: 4) {
+                        Picker("Insertion", selection: insertionBinding(for: $rule)) {
+                            Text("Auto-detect").tag(InsertionChoice.auto)
+                            Text("Always paste").tag(InsertionChoice.paste)
+                        }
+                        .pickerStyle(.segmented)
+                        Text("Always paste skips the is-this-a-text-field check — for apps that hide their inputs from macOS accessibility.")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+
+                    VStack(alignment: .leading, spacing: 4) {
                         Text("Tone hint")
                             .font(.caption)
                             .foregroundColor(.secondary)
@@ -352,6 +364,16 @@ private struct AppsTab: View {
     }
 
     private enum CleanupChoice: Hashable { case inherit, on, off }
+    private enum InsertionChoice: Hashable { case auto, paste }
+
+    private func insertionBinding(for rule: Binding<AppRule>) -> Binding<InsertionChoice> {
+        Binding(
+            get: { rule.wrappedValue.alwaysPaste ? .paste : .auto },
+            set: { choice in
+                rule.wrappedValue.insertionMode = (choice == .paste) ? "paste" : nil
+            }
+        )
+    }
 
     private func cleanupBinding(for rule: Binding<AppRule>) -> Binding<CleanupChoice> {
         Binding(
@@ -533,7 +555,7 @@ private struct ShortcutRecorderView: View {
                         .frame(minWidth: 200)
                 }
                 .buttonStyle(.bordered)
-                .tint(model.isRecording ? .accentColor : nil)
+                .tint(model.isRecording ? Color.ttPurple500 : nil)
             }
 
             if let error = model.errorMessage {

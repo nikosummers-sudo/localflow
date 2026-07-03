@@ -29,7 +29,7 @@ Gatekeeper warnings), installs it to /Applications, and launches it. Then:
    in the menu bar, then hold **Right Option** anywhere and talk.
 
 **Updates are automatic.** The installer sets up a background agent that checks this repo
-every 6 hours and quietly rebuilds and swaps in new versions — settings and permissions
+hourly and quietly rebuilds and swaps in new versions — settings and permissions
 survive. You can also update immediately by pasting the install command again, or turn
 auto-updates off with:
 
@@ -77,7 +77,7 @@ make smoke   # offline transcription self-test using the small "base" model
 make clean   # remove .build and build
 ```
 
-That's it. The menu bar shows a microphone icon when LocalFlow is running.
+That's it. The menu bar shows a waveform icon when LocalFlow is running.
 
 ### Stable signing (recommended)
 
@@ -257,10 +257,15 @@ holding **Right Option**. There are two gesture styles, depending on what you bi
   once to start recording hands-free and press it again to finish. The combo is swallowed
   system-wide while LocalFlow runs, so choose one no other app needs.
 
-The menu bar icon reflects the current state: idle (`mic`), recording (`mic.fill`), locked
-recording (`mic.badge.plus`), loading a model, transcribing (`waveform`), cleaning up
-(`wand.and.stars`), inserting, and — when there was no text field to paste into —
-copied-to-clipboard (`doc.on.clipboard`). Recording auto-stops after 10 minutes in either mode.
+Misheard a word? Click it in your [dictation history](#dictation-history) and correct it —
+LocalFlow learns your preference and won't get it wrong again.
+
+The menu bar icon reflects the current state: idle (`waveform.circle`), recording
+(`waveform.circle.fill`), locked recording (`lock.circle.fill`), loading a model, transcribing
+(`ellipsis.circle`), cleaning up (`wand.and.stars`), inserting, and — when there was no text
+field to paste into — copied-to-clipboard (`doc.on.clipboard`). It's a waveform, not a
+microphone, so it's easy to tell apart from macOS's own mic-in-use indicator. Recording
+auto-stops after 10 minutes in either mode.
 
 The menu also has a **Copy Last Transcript** item that re-copies your most recent dictation
 to the clipboard. It's a permanent safety net: even if a paste landed in the wrong place, was
@@ -348,6 +353,28 @@ Menu bar → **Settings…**:
 
 ## Troubleshooting
 
+- **Dictation inserts "you", "Thank you.", or a random short word on a fresh install — or
+  nothing at all.** Your microphone is delivering silence, so there's nothing real to
+  transcribe. On silent audio Whisper tends to emit a stock hallucination like *you* or
+  *Thank you.*, which is what you're seeing. The usual cause is that **Microphone permission
+  is off** (macOS feeds apps zeros instead of an error when it's denied, which is why pasting
+  still worked), or the **wrong / muted input device** is selected. Fix it in two places: open
+  **Setup** and make sure Microphone shows LocalFlow **ON**, then check **System Settings →
+  Sound → Input** and pick the mic you're actually speaking into. The pill's **bars must move
+  while you speak** — if they stay flat, LocalFlow isn't hearing you and now shows a *Can't
+  hear you — is the right mic selected?* hint. LocalFlow refuses to transcribe a silent
+  recording and tells you instead of pasting a hallucination. (This is a principled
+  input-level gate, not a word blocklist: dictating the actual word "you" is always inserted
+  normally.) **Granted the Microphone permission while LocalFlow was running?** macOS keeps
+  feeding an already-running app pre-grant silence until its audio engine is rebuilt —
+  LocalFlow now restarts its audio engine automatically when the grant lands, so the next
+  dictation hears you. On older builds, quit and reopen the app once after granting.
+- **Diagnosing a problem?** LocalFlow keeps a small rolling diagnostic log at
+  `~/Library/Logs/LocalFlow.log` — timestamped events only (dictation start/stop, input
+  device and sample rate, per-chunk timings, silence-gate and permission trips, engine
+  restarts, insertion outcomes, error messages). It contains **no dictated text, vocabulary,
+  or audio** — only what's needed to see why something misbehaved. The file self-trims so it
+  never grows large.
 - **Stuck on "Transcribing…" or "Cleaning…" right after a fresh install.** Almost always a
   one-time download finishing in the background, not a hang. Two things download on first use:
   (1) the **speech model** (~1.6 GB) — your first dictation waits for it, and the menu-bar icon
@@ -372,6 +399,12 @@ Menu bar → **Settings…**:
   can't accept text, so it left the transcript on your clipboard instead of pasting into
   nowhere. Click into a real text field and paste (⌘V), or use **Copy Last Transcript** from
   the menu.
+- **"No input field" in an app that clearly has one (e.g. the Claude desktop app).** Some
+  Electron apps hide their input fields from macOS accessibility, so LocalFlow can't see
+  the text box it's looking at. It force-enables the app's accessibility tree and re-checks
+  automatically; if an app still refuses, set **Insertion: Always paste** for it in
+  Settings → Apps (the Claude desktop app comes pre-configured). Your text is always on the
+  clipboard as a last resort — ⌘V pastes it.
 - **Why is the orange microphone indicator always on?** That dot is macOS's privacy
   indicator, shown whenever any app has the microphone open. LocalFlow keeps the mic open
   for **instant capture** (dictation starts instantly, first words never clipped). While

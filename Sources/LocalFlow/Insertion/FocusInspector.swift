@@ -1,4 +1,6 @@
+import AppKit
 import ApplicationServices
+import LocalFlowKit
 
 /// Classification of the system-wide focused UI element for deciding whether a
 /// synthesized paste will actually land somewhere useful.
@@ -32,10 +34,45 @@ enum FocusInspector {
         "AXTextInput",
     ]
 
-    /// Classifies the focused element. `.notEditable` is only returned when we
+    /// Once-per-process cache of Electron-unlock attempts so a stubborn app
+    /// doesn't pay the re-check wait on every dictation.
+    private static var unlockAttemptedPIDs = Set<pid_t>()
+    private static let unlockLock = NSLock()
+
+    /// Classifies the focused element. When the first pass says `.notEditable`,
+    /// tries the Electron unlock once per app process and re-checks: Electron
+    /// apps only build their accessibility tree when an assistive client asks
+    /// (Slack does this by itself; the Claude desktop app doesn't), so setting
+    /// AXManualAccessibility can turn an opaque "not editable" into the truth.
+    static func classifyFocusedElement() -> FocusTarget {
+        let first = classifyOnce()
+        guard first == .notEditable,
+              let app = NSWorkspace.shared.frontmostApplication else { return first }
+
+        let pid = app.processIdentifier
+        unlockLock.lock()
+        let alreadyTried = unlockAttemptedPIDs.contains(pid)
+        if !alreadyTried { unlockAttemptedPIDs.insert(pid) }
+        unlockLock.unlock()
+        guard !alreadyTried else { return first }
+
+        let appElement = AXUIElementCreateApplication(pid)
+        AXUIElementSetAttributeValue(
+            appElement, "AXManualAccessibility" as CFString, kCFBooleanTrue
+        )
+        usleep(250_000)  // give the app a beat to build its tree
+        let second = classifyOnce()
+        EventLog.log("ax.electronUnlock", [
+            "bundle": app.bundleIdentifier ?? "?",
+            "after": String(describing: second),
+        ])
+        return second
+    }
+
+    /// Single classification pass. `.notEditable` is only returned when we
     /// positively have (or positively lack) a focused element and none of the
     /// editable indicators hold; every error/ambiguity yields `.unknown`.
-    static func classifyFocusedElement() -> FocusTarget {
+    private static func classifyOnce() -> FocusTarget {
         let systemWide = AXUIElementCreateSystemWide()
         var focusedRef: CFTypeRef?
         let err = AXUIElementCopyAttributeValue(

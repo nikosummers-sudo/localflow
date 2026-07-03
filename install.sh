@@ -142,7 +142,7 @@ if [ -n "$OLLAMA_BIN" ]; then
   fi
 fi
 
-# ── 7. Auto-updates (background check every 6 h; silent rebuild + swap) ──────
+# ── 7. Auto-updates (hourly background check; silent rebuild + swap) ─────────
 PLIST="$HOME/Library/LaunchAgents/com.nikosummers.localflow.updater.plist"
 mkdir -p "$HOME/Library/LaunchAgents"
 cat >"$PLIST" <<PLIST
@@ -156,19 +156,32 @@ cat >"$PLIST" <<PLIST
     <string>/bin/bash</string>
     <string>$SRC/Scripts/auto-update.sh</string>
   </array>
-  <key>StartInterval</key><integer>21600</integer>
+  <key>StartInterval</key><integer>3600</integer>
   <key>RunAtLoad</key><true/>
 </dict>
 </plist>
 PLIST
 launchctl bootout "gui/$(id -u)" "$PLIST" 2>/dev/null || true
 launchctl bootstrap "gui/$(id -u)" "$PLIST" 2>/dev/null || launchctl load "$PLIST" 2>/dev/null || true
-echo "✓ Auto-updates on: checks GitHub every 6 hours and swaps in new versions."
+echo "✓ Auto-updates on: checks GitHub hourly and swaps in new versions."
 echo "  (Disable: launchctl bootout gui/\$(id -u) \"$PLIST\" && rm \"$PLIST\")"
 
-# ── 8. Launch ─────────────────────────────────────────────────────────────────
-open "$DEST/LocalFlow.app"
-bold "LocalFlow is running — look for the mic icon in your menu bar (top-right)."
+# ── 8. Launch (and VERIFY it actually came up — never claim ✓ on faith) ──────
+open "$DEST/LocalFlow.app" || true
+APP_RUNNING="no"
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  if pgrep -x LocalFlow >/dev/null 2>&1; then APP_RUNNING="yes"; break; fi
+  sleep 1
+done
+
+if [ "$APP_RUNNING" = "yes" ]; then
+  bold "LocalFlow is running — look for its icon in the Dock and the menu bar (top-right)."
+  echo "(On MacBooks with a notch, a crowded menu bar can hide new icons — the Dock icon"
+  echo " and Spotlight work regardless.)"
+else
+  bold "⚠️  LocalFlow didn't start by itself — open it manually:"
+  echo "   Press Cmd+Space, type LocalFlow, press Return (or open it from /Applications)."
+fi
 cat <<'EOF'
 Next steps:
   1. Grant the three permissions in the Setup window (Microphone, Accessibility,
@@ -179,12 +192,17 @@ Next steps:
      The menu bar icon shows progress; wait for "Ready".
   3. Hold RIGHT OPTION anywhere and talk. Release to insert.
      Press Right Option + Space to lock hands-free; tap Right Option to finish.
+  4. Wrong word? Open LocalFlow (Dock icon, or double-click it in /Applications),
+     hover a dictation, click the pencil, and fix the word — LocalFlow learns
+     your preference and won't get it wrong again.
+  5. Change the shortcut (and add vocabulary or tune AI cleanup) any time in
+     Settings — the gear in the LocalFlow window.
 
 LocalFlow lives in the menu bar (mic icon, top-right) and starts automatically
 when you log in. To reopen its Setup window, click the menu bar icon — or
 double-click LocalFlow in /Applications.
 
-Updates install themselves automatically (checked every 6 hours).
+Updates install themselves automatically (checked hourly).
 EOF
 
 # ── 9. Install summary (loud, and the last thing on screen) ──────────────────
@@ -197,10 +215,16 @@ else
   AI_SUMMARY="✗ not set up — LocalFlow will finish this itself on next launch, or run: ollama pull gemma3:4b"
 fi
 
+if [ "$APP_RUNNING" = "yes" ]; then
+  APP_SUMMARY="✓"
+else
+  APP_SUMMARY="✗ installed but not running — Cmd+Space, type LocalFlow, press Return"
+fi
+
 printf '\n'
 echo "────────────────────────────────────────────────────────────"
 echo "LocalFlow install summary"
-echo "  App installed & running:  ✓"
+echo "  App installed & running:  ${APP_SUMMARY}"
 echo "  Auto-updates:             ✓"
 echo "  AI cleanup (Ollama):      ${AI_SUMMARY}"
 echo "  Next: grant the 3 permissions in the Setup window."

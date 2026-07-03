@@ -75,23 +75,32 @@ public struct AppRule: Codable, Sendable, Equatable, Identifiable {
     /// nil/empty = no override; otherwise appended to the cleanup system prompt so
     /// the model matches this app's register (e.g. a casual Slack tone).
     public var toneAddendum: String?
+    /// nil or "auto" = detect whether the focused element accepts text before
+    /// pasting; "paste" = always paste in this app. The escape hatch for apps
+    /// (some Electron ones) that hide their inputs from macOS accessibility.
+    public var insertionMode: String?
+
+    /// True when this rule forces pasting without focus detection.
+    public var alwaysPaste: Bool { insertionMode == "paste" }
 
     public init(
         id: UUID = UUID(),
         bundleID: String,
         appName: String,
         cleanupEnabled: Bool? = nil,
-        toneAddendum: String? = nil
+        toneAddendum: String? = nil,
+        insertionMode: String? = nil
     ) {
         self.id = id
         self.bundleID = bundleID
         self.appName = appName
         self.cleanupEnabled = cleanupEnabled
         self.toneAddendum = toneAddendum
+        self.insertionMode = insertionMode
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, bundleID, appName, cleanupEnabled, toneAddendum
+        case id, bundleID, appName, cleanupEnabled, toneAddendum, insertionMode
     }
 
     public init(from decoder: Decoder) throws {
@@ -101,6 +110,7 @@ public struct AppRule: Codable, Sendable, Equatable, Identifiable {
         appName = (try? c.decode(String.self, forKey: .appName)) ?? ""
         cleanupEnabled = try? c.decodeIfPresent(Bool.self, forKey: .cleanupEnabled)
         toneAddendum = try? c.decodeIfPresent(String.self, forKey: .toneAddendum)
+        insertionMode = try? c.decodeIfPresent(String.self, forKey: .insertionMode)
     }
 }
 

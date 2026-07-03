@@ -47,6 +47,11 @@ final class HUDController {
             .receive(on: RunLoop.main)
             .sink { [weak self] level in self?.vm.audioLevel = level }
             .store(in: &cancellables)
+
+        appState.$showNoAudioHint
+            .receive(on: RunLoop.main)
+            .sink { [weak self] hint in self?.vm.noAudioHint = hint }
+            .store(in: &cancellables)
     }
 
     // MARK: - Status handling

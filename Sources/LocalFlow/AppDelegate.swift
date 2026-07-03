@@ -28,6 +28,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         hotkeyMonitor.onKeyUp = { AppState.shared.stopDictation() }
         hotkeyMonitor.onLockEngaged = { AppState.shared.lockDictation() }
 
+        // A dictation blocked by a denied Microphone permission asks us to open
+        // Setup so the user can turn it on (AppState can't reach the windows).
+        AppState.shared.onNeedsMicrophoneSetup = { [weak self] in self?.showOnboarding() }
+
         // Keep the login-item registration in sync with the saved setting (default on).
         LaunchAtLogin.reconcile()
 
@@ -112,11 +116,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 onRelaunch: { [weak self] in self?.relaunch() },
                 onPermissionsChanged: { [weak self] in
                     self?.restartHotkeyIfPossible()
-                    // Mic may have just been granted — start instant capture now.
-                    AppState.shared.refreshContinuousCapture()
+                    // Mic may have just been granted. Route through the transition
+                    // handler: on a fresh grant it rebuilds the audio engine so it
+                    // doesn't keep feeding pre-grant silence; otherwise it just
+                    // reconciles continuous capture as before.
+                    AppState.shared.handleMicrophonePermissionChange()
+                },
+                onOpenMain: { [weak self] in
+                    self?.showMainWindow()
+                    // Setup is done — step aside for the app's home window.
+                    self?.onboardingWindow?.orderOut(nil)
                 }
             )
-            onboardingWindow = makeWindow(title: "LocalFlow Setup", width: 460, height: 540, content: view)
+            onboardingWindow = makeWindow(title: "LocalFlow Setup", width: 460, height: 600, content: view)
         }
 
         // Register (and prompt for) Input Monitoring as setup opens, so LocalFlow's row

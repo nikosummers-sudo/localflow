@@ -31,7 +31,9 @@ if CommandLine.arguments.contains("--store") {
     store.appRules = [
         AppRule(bundleID: "com.tinyspeck.slackmacgap", appName: "Slack",
                 cleanupEnabled: true, toneAddendum: "Casual Slack message — keep contractions."),
-        AppRule(bundleID: "com.apple.mail", appName: "Mail") // nil overrides = inherit
+        AppRule(bundleID: "com.apple.mail", appName: "Mail"), // nil overrides = inherit
+        AppRule(bundleID: "com.anthropic.claudefordesktop", appName: "Claude",
+                insertionMode: "paste")
     ]
 
     let dictJSON = (try? String(contentsOf: dir.appendingPathComponent("dictionary.json"), encoding: .utf8)) ?? "(missing)"
@@ -48,6 +50,11 @@ if CommandLine.arguments.contains("--store") {
     check("nil overrides stay nil after reload",
           reloaded.appRules.first(where: { $0.bundleID == "com.apple.mail" })?.cleanupEnabled == nil)
     check("rule lookup by bundle id works", reloaded.rule(forBundleID: "com.tinyspeck.slackmacgap")?.cleanupEnabled == true)
+    check("insertionMode round-trips through disk",
+          reloaded.rule(forBundleID: "com.anthropic.claudefordesktop")?.alwaysPaste == true)
+    check("missing insertionMode decodes to nil (auto)",
+          reloaded.rule(forBundleID: "com.apple.mail")?.insertionMode == nil
+          && reloaded.rule(forBundleID: "com.apple.mail")?.alwaysPaste == false)
 
     try? FileManager.default.removeItem(at: dir)
     print(failures == 0 ? "STORE: OK" : "STORE: \(failures) FAILURE(S)")
@@ -285,6 +292,129 @@ if CommandLine.arguments.contains("--history") {
     try? FileManager.default.removeItem(at: loopDir)
 
     print(failures == 0 ? "HISTORY: OK" : "HISTORY: \(failures) FAILURE(S)")
+    exit(failures == 0 ? 0 : 1)
+}
+
+// MARK: - AudioGate: pure silence/speech gate (no mic, model, or network)
+
+if CommandLine.arguments.contains("--audio") {
+    let sr = 16000.0
+
+    // Deterministic tone generator. A steady sine is a fair stand-in for a voiced
+    // frame's energy; its RMS is amplitude / √2.
+    func sine(amplitude: Float, freq: Double, seconds: Double, sampleRate: Double = 16000) -> [Float] {
+        let n = Int(seconds * sampleRate)
+        guard n > 0 else { return [] }
+        var out = [Float](repeating: 0, count: n)
+        let w = 2 * Double.pi * freq / sampleRate
+        for i in 0..<n { out[i] = amplitude * Float(sin(w * Double(i))) }
+        return out
+    }
+
+    func silence(_ seconds: Double) -> [Float] { [Float](repeating: 0, count: Int(seconds * sr)) }
+
+    // Overlays `tone` onto a silent buffer starting at `atSeconds`.
+    func burst(toneAmplitude: Float, toneSeconds: Double, atSeconds: Double, totalSeconds: Double) -> [Float] {
+        var out = silence(totalSeconds)
+        let tone = sine(amplitude: toneAmplitude, freq: 220, seconds: toneSeconds, sampleRate: sr)
+        let start = Int(atSeconds * sr)
+        for (j, s) in tone.enumerated() where start + j < out.count { out[start + j] = s }
+        return out
+    }
+
+    // 1) Pure silence — the true denied/muted-mic case.
+    let zeros = silence(3)
+    check("all-zero (silent) audio has no speech", AudioGate.containsSpeech(zeros, sampleRate: sr) == false)
+    check("all-zero maxFrameRMS is 0 [\(AudioGate.maxFrameRMS(zeros, sampleRate: sr))]",
+          AudioGate.maxFrameRMS(zeros, sampleRate: sr) == 0)
+
+    // 2) Low-level 0.001-amplitude tone (~0.0007 RMS) — below the gate.
+    let low = sine(amplitude: 0.001, freq: 200, seconds: 3, sampleRate: sr)
+    check("low-level 0.001-amplitude audio is below the speech gate",
+          AudioGate.containsSpeech(low, sampleRate: sr) == false)
+    check("low-level maxFrameRMS stays under threshold [\(AudioGate.maxFrameRMS(low, sampleRate: sr))]",
+          AudioGate.maxFrameRMS(low, sampleRate: sr) < AudioGate.speechThreshold)
+
+    // 3) A 0.5s 0.05-amplitude burst (~0.035 RMS) inside 3s of silence — speech.
+    let oneBurst = burst(toneAmplitude: 0.05, toneSeconds: 0.5, atSeconds: 1.0, totalSeconds: 3.0)
+    check("a 0.5s speech-level burst within silence counts as speech",
+          AudioGate.containsSpeech(oneBurst, sampleRate: sr) == true)
+    check("burst maxFrameRMS is above the speech threshold [\(AudioGate.maxFrameRMS(oneBurst, sampleRate: sr))]",
+          AudioGate.maxFrameRMS(oneBurst, sampleRate: sr) > AudioGate.speechThreshold)
+
+    // 4) Speech-like alternating voiced/silent bursts — speech.
+    var speechLike: [Float] = []
+    for _ in 0..<4 {
+        speechLike += sine(amplitude: 0.05, freq: 180, seconds: 0.3, sampleRate: sr)
+        speechLike += silence(0.2)
+    }
+    check("speech-like alternating bursts count as speech",
+          AudioGate.containsSpeech(speechLike, sampleRate: sr) == true)
+
+    // 5) A sub-0.3s blip is loud but too brief to clear the 3-frame minimum.
+    let blip = burst(toneAmplitude: 0.05, toneSeconds: 0.1, atSeconds: 0.4, totalSeconds: 1.0)
+    check("a loud but sub-0.3s blip does not trip the speech gate",
+          AudioGate.containsSpeech(blip, sampleRate: sr) == false)
+    check("blip maxFrameRMS still reports the loud frame [\(AudioGate.maxFrameRMS(blip, sampleRate: sr))]",
+          AudioGate.maxFrameRMS(blip, sampleRate: sr) > AudioGate.speechThreshold)
+
+    print(failures == 0 ? "AUDIO: OK" : "AUDIO: \(failures) FAILURE(S)")
+    exit(failures == 0 ? 0 : 1)
+}
+
+// MARK: - EventLog: single-line records, rotation, no dictated content
+
+if CommandLine.arguments.contains("--log") {
+    let epoch = Date(timeIntervalSince1970: 0)
+
+    // Line format: ISO timestamp + event + sorted key=value fields, one line.
+    let line = EventLog.composeLine(
+        event: "dictation.stop",
+        fields: ["duration": "1.20", "samples": "19200", "maxRMS": "0.031"],
+        date: epoch)
+    check("event line is single-line", !line.contains("\n"))
+    check("event line starts with an ISO timestamp [\(line.prefix(20))]",
+          line.hasPrefix("1970-01-01T00:00:00Z"))
+    check("event line carries the event name and every field [\(line)]",
+          line.contains("dictation.stop")
+              && line.contains("duration=1.20")
+              && line.contains("maxRMS=0.031")
+              && line.contains("samples=19200"))
+
+    // Newlines/tabs in any value are flattened so one event == one line.
+    let flat = EventLog.composeLine(event: "x", fields: ["k": "a\nb\tc"], date: epoch)
+    check("field values are flattened to one line [\(flat)]",
+          !flat.contains("\n") && !flat.contains("\t") && flat.contains("k=a b c"))
+
+    // Append + rotation: crossing maxLines trims to trimTo, keeping the newest.
+    // Appending exactly maxLines+1 lands cleanly on a single trim.
+    let dir = FileManager.default.temporaryDirectory
+        .appendingPathComponent("localflow-logcheck-\(UUID().uuidString)", isDirectory: true)
+    try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    let logURL = dir.appendingPathComponent("LocalFlow.log")
+    let total = EventLog.maxLines + 1
+    for i in 0..<total { EventLog.appendAndTrim(line: "line\(i)", url: logURL) }
+    func logLines() -> [String] {
+        let contents = (try? String(contentsOf: logURL, encoding: .utf8)) ?? ""
+        var ls = contents.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        if ls.last == "" { ls.removeLast() }
+        return ls
+    }
+    let lines = logLines()
+    check("log rotates down to trimTo lines when it crosses the cap [\(lines.count)]",
+          lines.count == EventLog.trimTo)
+    check("log keeps the most recent line after rotation [\(lines.last ?? "nil")]",
+          lines.last == "line\(total - 1)")
+    check("log drops the oldest lines after rotation [\(lines.first ?? "nil")]",
+          lines.first == "line\(total - EventLog.trimTo)")
+
+    // Invariant: further appends never let the file exceed maxLines.
+    for i in total..<(total + 400) { EventLog.appendAndTrim(line: "line\(i)", url: logURL) }
+    check("log stays bounded at/under maxLines after more appends [\(logLines().count)]",
+          logLines().count <= EventLog.maxLines)
+    try? FileManager.default.removeItem(at: dir)
+
+    print(failures == 0 ? "LOG: OK" : "LOG: \(failures) FAILURE(S)")
     exit(failures == 0 ? 0 : 1)
 }
 

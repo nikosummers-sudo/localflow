@@ -20,6 +20,9 @@ final class HUDViewModel: ObservableObject {
     @Published var partialText: String = ""
     /// Normalized 0–1 mic level driving the voice-reactive bars.
     @Published var audioLevel: Float = 0
+    /// When true while listening, the pill shows a "Can't hear you" hint under the
+    /// bars — set once a few seconds pass with no audible input.
+    @Published var noAudioHint: Bool = false
 
     var isListening: Bool {
         if case .listening = phase { return true }
@@ -41,6 +44,16 @@ struct HUDView: View {
         showLivePreview && vm.isListening && !vm.partialText.isEmpty
     }
 
+    /// The "Can't hear you" hint replaces the preview tail while listening if no
+    /// audible input has arrived (it takes priority — with no audio there's no
+    /// partial text to preview anyway).
+    private var showNoAudioLine: Bool {
+        vm.isListening && vm.noAudioHint
+    }
+
+    /// The pill widens into a rounded rect whenever a secondary line is showing.
+    private var isExpanded: Bool { showNoAudioLine || showPreviewTail }
+
     var body: some View {
         ZStack {
             Color.clear
@@ -58,9 +71,16 @@ struct HUDView: View {
             HStack(spacing: 9) {
                 row
             }
-            .frame(minWidth: 96, alignment: .leading)
 
-            if showPreviewTail {
+            if showNoAudioLine {
+                // Secondary hint while the bars keep animating — the mic is being
+                // read but nothing audible is coming through.
+                Text("Can't hear you — is the right mic selected?")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(.yellow)
+                    .lineLimit(1)
+                    .fixedSize()
+            } else if showPreviewTail {
                 // Fixed width so the pill becomes a stable wider rounded rect;
                 // head-truncation keeps the freshest words visible.
                 Text(tail(of: vm.partialText))
@@ -83,7 +103,7 @@ struct HUDView: View {
     /// multi-line preview is showing. Solid dark fill — never a material.
     @ViewBuilder
     private var pillBackground: some View {
-        if showPreviewTail {
+        if isExpanded {
             RoundedRectangle(cornerRadius: 20, style: .continuous)
                 .fill(Color.black.opacity(0.78))
         } else {
@@ -123,7 +143,7 @@ struct HUDView: View {
         case .inserted:
             Image(systemName: "checkmark.circle.fill")
                 .font(.system(size: 15, weight: .semibold))
-                .foregroundStyle(.white)
+                .foregroundStyle(Color.ttOrange500)
                 .symbolEffect(.bounce, value: vm.phase)
             label("Inserted")
         case .noInputField:
@@ -178,7 +198,7 @@ private struct VoiceBars: View {
         HStack(alignment: .center, spacing: 3) {
             ForEach(0..<barCount, id: \.self) { index in
                 Capsule(style: .continuous)
-                    .fill(Color.white)
+                    .fill(Color.ttVoiceBars[index % Color.ttVoiceBars.count])
                     .frame(width: barWidth, height: height(for: index))
             }
         }

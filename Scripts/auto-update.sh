@@ -26,6 +26,19 @@ trap 'rmdir "$LOCK"' EXIT
 [ -d "$SRC/.git" ] || { echo "$(date '+%F %T') no checkout at $SRC — run the installer"; exit 0; }
 cd "$SRC"
 
+# Self-heal the LaunchAgent definition (e.g. interval changes shipped via git).
+# Rewrite only — no self-bootout while this very agent is running; launchd
+# picks up the new interval at the next login.
+PLIST="$HOME/Library/LaunchAgents/com.nikosummers.localflow.updater.plist"
+DESIRED_INTERVAL=3600
+if [ -f "$PLIST" ]; then
+  CUR="$(defaults read "$PLIST" StartInterval 2>/dev/null || echo 0)"
+  if [ "$CUR" != "$DESIRED_INTERVAL" ]; then
+    /usr/bin/sed -i '' "s|<key>StartInterval</key><integer>[0-9]*</integer>|<key>StartInterval</key><integer>${DESIRED_INTERVAL}</integer>|" "$PLIST" \
+      && echo "$(date '+%F %T') updater interval healed ${CUR} -> ${DESIRED_INTERVAL} (applies at next login)"
+  fi
+fi
+
 git fetch --depth 1 origin main --quiet || { echo "$(date '+%F %T') fetch failed (offline?)"; exit 0; }
 LOCAL="$(git rev-parse HEAD)"
 REMOTE="$(git rev-parse origin/main)"

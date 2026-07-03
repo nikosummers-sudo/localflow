@@ -77,6 +77,16 @@ public actor IncrementalTranscriber {
     private var tailAudioSeconds = 0
     private var tailSttMs = 0.0
 
+    /// Whether any chunk or the tail cleared the speech gate. When false, the whole
+    /// dictation was silent (denied/muted/wrong mic) and the app surfaces the
+    /// "Couldn't hear you" hint rather than inserting nothing.
+    private var sawSpeech = false
+
+    /// Count of voiced chunks/tail whose STT threw twice (after one retry). These
+    /// contribute empty text but are counted so `assembleFinalText` can surface a
+    /// note — a dropped chunk must never vanish silently.
+    private var failedPartCount = 0
+
     public init(
         engine: SerialTranscriptionEngine,
         cleanupEnabled: Bool,
@@ -96,6 +106,11 @@ public actor IncrementalTranscriber {
     /// means the dictation was short enough that no chunk ever committed, so it
     /// runs the existing single-pass path instead.
     public var committedChunkCount: Int { rawChunks.count }
+
+    /// True once any chunk or the tail has passed the speech gate. Checked by the
+    /// app after `transcribeTail` to distinguish a real dictation from a fully
+    /// silent recording. False until the first voiced chunk/tail.
+    public var heardSpeech: Bool { sawSpeech }
 
     // MARK: - Supervisor
 
@@ -176,16 +191,40 @@ public actor IncrementalTranscriber {
         let chunk = source.samples(in: committed..<cut)
         let audioSeconds = Double(chunk.count) / config.sampleRate
 
-        let started = DispatchTime.now()
-        let sttText = (try? await engine.transcribe(samples: chunk)) ?? ""
-        let sttMs = Self.elapsedMs(since: started)
-
-        // Encode command phrases on the RAW chunk, before cleanup can mangle the
-        // literal words. The placeholders survive cleanup (the prompt preserves
-        // them) and into the raw-fallback path, then decode at the final choke point.
-        let raw = voiceCommandsEnabled ? encodeCommands(sttText) : sttText
-
         let index = rawChunks.count
+
+        // Silence guard: a silent chunk is skipped (no STT) so Whisper can't
+        // hallucinate text from it. It still commits as an empty chunk so chunk
+        // counting and the committed cursor stay consistent.
+        let voiced = AudioGate.containsSpeech(chunk, sampleRate: config.sampleRate)
+        if voiced { sawSpeech = true }
+
+        var raw = ""
+        var sttMs = 0.0
+        var failed = false
+        if voiced {
+            let started = DispatchTime.now()
+            if let text = await transcribeWithRetry(chunk, part: "chunk\(index)") {
+                // Encode command phrases on the RAW chunk, before cleanup can mangle
+                // the literal words. Placeholders survive cleanup and the raw-fallback
+                // path, then decode at the final choke point.
+                raw = voiceCommandsEnabled ? encodeCommands(text) : text
+            } else {
+                // STT threw twice — keep "" but count it so the note surfaces.
+                failed = true
+                failedPartCount += 1
+            }
+            sttMs = Self.elapsedMs(since: started)
+        }
+
+        EventLog.log("chunk", [
+            "index": String(index),
+            "audioS": String(format: "%.2f", audioSeconds),
+            "sttMs": String(format: "%.0f", sttMs),
+            "voiced": voiced ? "1" : "0",
+            "failed": failed ? "1" : "0",
+        ])
+
         rawChunks.append(raw)
         cleanedChunks.append(nil)
         chunkTimings.append(ChunkTiming(audioSeconds: audioSeconds, sttMs: sttMs, cleanupMs: nil))
@@ -193,8 +232,8 @@ public actor IncrementalTranscriber {
 
         // Kick cleanup immediately so it overlaps with the next chunk's capture.
         // Recording time dwarfs cleanup time, so these should all be done well
-        // before release.
-        if cleanupEnabled {
+        // before release. Skip empty chunks (silent, or empty STT) — nothing to clean.
+        if cleanupEnabled, !raw.isEmpty {
             let task = Task { await self.cleanupChunk(index: index, raw: raw) }
             cleanupTasks.append(task)
         }
@@ -218,10 +257,32 @@ public actor IncrementalTranscriber {
         tailAudioSeconds = tail.count
         guard !tail.isEmpty else { return }
 
+        let tailSeconds = Double(tail.count) / config.sampleRate
+
+        // Silence guard: skip STT on a silent tail so it can't hallucinate. Leaves
+        // tailRaw empty and records 0 ms — the tail simply contributes nothing.
+        guard AudioGate.containsSpeech(tail, sampleRate: config.sampleRate) else {
+            tailSttMs = 0
+            EventLog.log("tail", ["audioS": String(format: "%.2f", tailSeconds), "voiced": "0", "failed": "0"])
+            return
+        }
+        sawSpeech = true
+
         let started = DispatchTime.now()
-        let sttText = (try? await engine.transcribe(samples: tail)) ?? ""
-        tailRaw = voiceCommandsEnabled ? encodeCommands(sttText) : sttText
+        var failed = false
+        if let text = await transcribeWithRetry(tail, part: "tail") {
+            tailRaw = voiceCommandsEnabled ? encodeCommands(text) : text
+        } else {
+            failed = true
+            failedPartCount += 1
+        }
         tailSttMs = Self.elapsedMs(since: started)
+        EventLog.log("tail", [
+            "audioS": String(format: "%.2f", tailSeconds),
+            "sttMs": String(format: "%.0f", tailSttMs),
+            "voiced": "1",
+            "failed": failed ? "1" : "0",
+        ])
     }
 
     /// Awaits any outstanding chunk cleanups, cleans the tail, and joins all
@@ -264,6 +325,21 @@ public actor IncrementalTranscriber {
         // collapse space/tab runs. Real newline decoding happens at the app's
         // final choke point.
         let joined = normalizeInlineWhitespace(parts.joined(separator: " "))
+
+        // A dropped chunk/tail must never vanish silently: if any voiced part failed
+        // STT (after its retry), surface it. This takes precedence over a cleanup
+        // raw-fallback note — a lost chunk is the more important thing to report.
+        if failedPartCount > 0 {
+            note = "Part of the dictation couldn't be transcribed"
+        }
+
+        EventLog.log("assemble", [
+            "chunks": String(rawChunks.count),
+            "failedParts": String(failedPartCount),
+            "cleanupFallback": (note != nil && failedPartCount == 0) ? "1" : "0",
+            "tailCleanupMs": String(format: "%.0f", tailCleanupMs),
+        ])
+
         return StreamResult(
             text: joined,
             note: note,
@@ -275,6 +351,26 @@ public actor IncrementalTranscriber {
     }
 
     // MARK: - Helpers
+
+    /// Transcribes with ONE retry. Returns the text on success (possibly empty, which
+    /// is a valid "nothing intelligible" result), or nil if the engine threw on both
+    /// attempts. A thrown error used to be swallowed into "" via `try?`, which made a
+    /// failed chunk — e.g. the front of a long dictation — disappear with no signal;
+    /// nil lets the caller count the failure and surface a note. Both throws are logged
+    /// (error descriptions only — no transcript content).
+    private func transcribeWithRetry(_ samples: [Float], part: String) async -> String? {
+        do {
+            return try await engine.transcribe(samples: samples)
+        } catch {
+            EventLog.log("stt.retry", ["part": part, "error": String(describing: error)])
+        }
+        do {
+            return try await engine.transcribe(samples: samples)
+        } catch {
+            EventLog.log("stt.failed", ["part": part, "error": String(describing: error)])
+            return nil
+        }
+    }
 
     private static func rms(_ samples: [Float], from offset: Int, count: Int) -> Float {
         var sumSquares: Float = 0

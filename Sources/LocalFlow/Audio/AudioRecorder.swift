@@ -1,5 +1,7 @@
 import AVFoundation
+import CoreAudio
 import Foundation
+import LocalFlowKit
 
 /// Records microphone audio and delivers it as 16 kHz mono Float32 samples,
 /// the format WhisperKit expects. The input tap uses the hardware's native
@@ -103,6 +105,40 @@ final class AudioRecorder {
         return Array(samples[lower..<upper])
     }
 
+    /// A cheap, content-free description of the current input for diagnostics: the
+    /// hardware input sample rate (always available) and, best-effort, the default
+    /// input device's name. Used only for the event log — never touches audio data.
+    func inputDescription() -> (deviceName: String?, sampleRate: Double) {
+        engineLock.lock()
+        let rate = engine.inputNode.inputFormat(forBus: 0).sampleRate
+        engineLock.unlock()
+        return (Self.defaultInputDeviceName(), rate)
+    }
+
+    /// The default input device's name via Core Audio. Returns nil on any failure
+    /// (no device, query error) — diagnostics must never disrupt capture.
+    private static func defaultInputDeviceName() -> String? {
+        var deviceID = AudioDeviceID(0)
+        var size = UInt32(MemoryLayout<AudioDeviceID>.size)
+        var deviceAddr = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultInputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        guard AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject),
+                                         &deviceAddr, 0, nil, &size, &deviceID) == noErr,
+              deviceID != 0 else { return nil }
+
+        var name: Unmanaged<CFString>?
+        var nameSize = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
+        var nameAddr = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyDeviceNameCFString,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        guard AudioObjectGetPropertyData(deviceID, &nameAddr, 0, nil, &nameSize, &name) == noErr,
+              let cf = name?.takeRetainedValue() else { return nil }
+        return cf as String
+    }
+
     enum RecorderError: Error, LocalizedError {
         case converterUnavailable
         case engineStartFailed(String)
@@ -132,6 +168,38 @@ final class AudioRecorder {
         try installTapLocked()
         try startEngineLocked()
         captureMode = true
+    }
+
+    /// Fully tears down and rebuilds the continuous-capture engine + tap against
+    /// the current input. Needed when the Microphone permission is granted while
+    /// the app is already running: macOS keeps feeding an already-running tap
+    /// pre-grant silence until the engine is stopped and the input node is
+    /// reconfigured. No-op (leaves capture as-is) when not in continuous mode —
+    /// the caller starts a fresh capture in that case. Never rebuilds out from
+    /// under a live dictation. Best-effort: on failure capture is left stopped and
+    /// the next `beginRecording()` retries a start.
+    func restartContinuousCapture() throws {
+        engineLock.lock()
+        defer { engineLock.unlock() }
+        guard captureMode, !dictating else { return }
+
+        removeTapLocked()
+        engine.stop()
+        lock.lock()
+        samples.removeAll(keepingCapacity: true)
+        ring.removeAll(keepingCapacity: true)
+        lock.unlock()
+        do {
+            try installTapLocked()
+            try startEngineLocked()
+        } catch {
+            captureMode = false
+            onLevel?(0)
+            EventLog.log("engine.restart", ["reason": "mic-grant", "result": "failed"])
+            throw error
+        }
+        onLevel?(0)
+        EventLog.log("engine.restart", ["reason": "mic-grant", "result": "ok"])
     }
 
     /// Stops continuous capture entirely (engine + tap). Any in-progress dictation
@@ -257,8 +325,13 @@ final class AudioRecorder {
         do {
             try installTapLocked()
             if !engine.isRunning { try startEngineLocked() }
+            EventLog.log("engine.configchange", [
+                "result": "ok",
+                "inputHz": String(format: "%.0f", engine.inputNode.inputFormat(forBus: 0).sampleRate),
+            ])
         } catch {
             // Leave capture stopped; the next beginRecording() will retry a start.
+            EventLog.log("engine.configchange", ["result": "failed"])
         }
     }
 
