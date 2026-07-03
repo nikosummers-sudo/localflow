@@ -124,6 +124,18 @@ final class AppState: ObservableObject {
         hotkeyBinding = HotkeyBinding.load()
     }
 
+    /// False when Input Monitoring is granted but the event tap is dead — the macOS
+    /// "grant doesn't apply to the running process" wedge. Drives the menu bar's
+    /// warning icon and "Fix Now" button so the state is never silently invisible.
+    /// (Stays true while permissions are simply not granted yet; onboarding owns
+    /// that flow.)
+    @Published private(set) var hotkeyActive: Bool = true
+
+    func setHotkeyActive(_ active: Bool) {
+        guard hotkeyActive != active else { return }
+        hotkeyActive = active
+    }
+
     /// Live, display-only preview text produced during recording. Never used for
     /// the final inserted text — that always comes from the main engine.
     @Published var partialText: String = ""

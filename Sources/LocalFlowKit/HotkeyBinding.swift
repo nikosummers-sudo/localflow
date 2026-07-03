@@ -82,13 +82,39 @@ public enum HotkeyBinding: Codable, Equatable {
 
     // MARK: - Combo matching
 
+    /// Keys that implicitly carry the fn/function flag: arrows, F-keys, Home/End,
+    /// Page Up/Down, forward delete, and Help. AppKit sets `.function` on these
+    /// automatically, and CGEvents from the internal keyboard carry
+    /// `.maskSecondaryFn` — but external keyboards often DON'T. The fn bit on these
+    /// keys is noise, not intent, so both recording and matching strip it.
+    public static let functionTypeKeyCodes: Set<Int64> = [
+        123, 124, 125, 126,                     // arrows
+        115, 116, 119, 121, 117, 114,           // Home, Page Up, End, Page Down, forward delete, Help
+        122, 120, 99, 118, 96, 97, 98, 100,     // F1–F8
+        101, 109, 103, 111, 105, 107, 113,      // F9–F15
+        106, 64, 79, 80, 90                     // F16–F20
+    ]
+
+    /// `normalize`, minus the fn bit when the key is a function-type key (where fn
+    /// is hardware noise rather than a modifier the user chose to hold).
+    public static func normalizedModifiers(forKeyCode keyCode: Int64, flags: CGEventFlags) -> UInt64 {
+        var bits = normalize(flags)
+        if functionTypeKeyCodes.contains(keyCode) { bits &= ~modFn }
+        return bits
+    }
+
     /// True iff a keyDown of `eventKeyCode` with `eventFlags` should trigger `binding`.
     /// Only `.comboToggle` can match. The modifier match is EXACT on the five generic
     /// bits (subset AND no extras), so a ⌘D binding does not fire on ⌘⇧D, and vice versa.
+    /// On function-type keys the fn bit is ignored on BOTH sides, so a binding recorded
+    /// with the implicit fn (older builds, internal keyboard) still matches events from
+    /// keyboards that don't send it, and vice versa.
     public static func matchesCombo(eventKeyCode: Int64, eventFlags: CGEventFlags, binding: HotkeyBinding) -> Bool {
         guard case let .comboToggle(keyCode, requiredModifiers) = binding else { return false }
         guard eventKeyCode == keyCode else { return false }
-        return normalize(eventFlags) == requiredModifiers
+        var required = requiredModifiers
+        if functionTypeKeyCodes.contains(keyCode) { required &= ~modFn }
+        return normalizedModifiers(forKeyCode: eventKeyCode, flags: eventFlags) == required
     }
 
     // MARK: - Migration
@@ -99,15 +125,19 @@ public enum HotkeyBinding: Codable, Equatable {
     }
 
     /// Loads the binding: the JSON binding if present, else a migrated legacy keycode,
-    /// else the default.
+    /// else the default. A persisted binding that fails validation (written by an old
+    /// build, or corrupted) falls back to the default — persisted state survives
+    /// reinstalls, so a bad binding must never leave the hotkey permanently dead.
     public static func load(from defaults: UserDefaults = .standard) -> HotkeyBinding {
         if let data = defaults.data(forKey: defaultsKey),
-           let decoded = try? JSONDecoder().decode(HotkeyBinding.self, from: data) {
+           let decoded = try? JSONDecoder().decode(HotkeyBinding.self, from: data),
+           validate(decoded) == .valid {
             return decoded
         }
         let legacy = defaults.integer(forKey: legacyKeyCodeDefaultsKey)
         if legacy != 0 {
-            return migrate(legacyKeyCode: legacy)
+            let migrated = migrate(legacyKeyCode: legacy)
+            if validate(migrated) == .valid { return migrated }
         }
         return .default
     }

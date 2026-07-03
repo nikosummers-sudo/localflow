@@ -180,6 +180,54 @@ if CommandLine.arguments.contains("--hotkey") {
     check("an empty modifier hold is rejected",
           !isValid(.modifierHold(keyCodes: [])))
 
+    // --- fn-bit consistency on function-type keys
+    // AppKit sets the fn/function flag automatically on arrows, F-keys, Home/End,
+    // etc. Internal keyboards carry it in CGEvents too; external keyboards often
+    // don't. A combo on one of those keys must match with OR without the implicit
+    // fn bit — else a shortcut recorded on the laptop dies on an external keyboard
+    // (and vice versa), which reads as "changed the shortcut, nothing happens".
+    let rightArrow: Int64 = 124
+    let comboWithImplicitFn = HotkeyBinding.comboToggle(
+        keyCode: rightArrow, requiredModifiers: HotkeyBinding.modCommand | HotkeyBinding.modFn)
+    let comboClean = HotkeyBinding.comboToggle(
+        keyCode: rightArrow, requiredModifiers: HotkeyBinding.modCommand)
+    check("⌘→ recorded WITH implicit fn fires on an event WITHOUT fn",
+          HotkeyBinding.matchesCombo(eventKeyCode: rightArrow, eventFlags: flags(.maskCommand), binding: comboWithImplicitFn))
+    check("⌘→ recorded WITH implicit fn fires on an event WITH fn",
+          HotkeyBinding.matchesCombo(eventKeyCode: rightArrow, eventFlags: flags(.maskCommand, .maskSecondaryFn), binding: comboWithImplicitFn))
+    check("⌘→ recorded clean fires on an event WITH fn",
+          HotkeyBinding.matchesCombo(eventKeyCode: rightArrow, eventFlags: flags(.maskCommand, .maskSecondaryFn), binding: comboClean))
+    check("fn is still a REAL modifier on a normal key: fn+D does not fire on bare D",
+          !HotkeyBinding.matchesCombo(eventKeyCode: 2, eventFlags: CGEventFlags(), binding: .comboToggle(keyCode: 2, requiredModifiers: HotkeyBinding.modFn)))
+    check("fn+D fires on fn+D",
+          HotkeyBinding.matchesCombo(eventKeyCode: 2, eventFlags: flags(.maskSecondaryFn), binding: .comboToggle(keyCode: 2, requiredModifiers: HotkeyBinding.modFn)))
+    check("normalizedModifiers strips fn for a function-type key",
+          HotkeyBinding.normalizedModifiers(forKeyCode: rightArrow, flags: flags(.maskCommand, .maskSecondaryFn))
+              == HotkeyBinding.modCommand)
+    check("normalizedModifiers keeps fn for a normal key",
+          HotkeyBinding.normalizedModifiers(forKeyCode: 2, flags: flags(.maskSecondaryFn))
+              == HotkeyBinding.modFn)
+
+    // --- load() self-heals an invalid persisted binding
+    // Persisted state survives reinstall + tccutil reset; a bad binding written by
+    // any past build must never leave the hotkey permanently dead. Invalid → default.
+    do {
+        let suite = "localflow-hotkeycheck-invalid-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        if let bad = try? JSONEncoder().encode(HotkeyBinding.modifierHold(keyCodes: [])) {
+            defaults.set(bad, forKey: HotkeyBinding.defaultsKey)
+        }
+        check("load() falls back to default on an invalid persisted binding (empty hold)",
+              HotkeyBinding.load(from: defaults) == HotkeyBinding.default)
+
+        if let badCombo = try? JSONEncoder().encode(HotkeyBinding.comboToggle(keyCode: 49, requiredModifiers: 0)) {
+            defaults.set(badCombo, forKey: HotkeyBinding.defaultsKey)
+        }
+        check("load() falls back to default on an invalid persisted binding (bare Space combo)",
+              HotkeyBinding.load(from: defaults) == HotkeyBinding.default)
+        defaults.removePersistentDomain(forName: suite)
+    }
+
     print(failures == 0 ? "HOTKEY: OK" : "HOTKEY: \(failures) FAILURE(S)")
     exit(failures == 0 ? 0 : 1)
 }

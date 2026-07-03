@@ -27,8 +27,12 @@ security find-identity -v -p codesigning | grep -q "$IDENTITY" \
 # than any release — the download-updater always supersedes it. We bump the
 # WORKING copy only for this build, then revert it before committing.
 PB="/usr/libexec/PlistBuddy"
+# Read the last build from latest.json with plutil (PlistBuddy can't parse JSON).
 CUR_BUILD=1
-[ -f latest.json ] && CUR_BUILD="$("$PB" -c "Print :build" latest.json 2>/dev/null || echo 1)"
+if [ -f latest.json ]; then
+  CUR_BUILD="$(plutil -extract build raw -o - latest.json 2>/dev/null || echo 1)"
+fi
+case "$CUR_BUILD" in ''|*[!0-9]*) CUR_BUILD=1 ;; esac
 NEW_BUILD=$((CUR_BUILD + 1))
 SHORT="${1:-$("$PB" -c "Print :CFBundleShortVersionString" "$PLIST")}"
 "$PB" -c "Set :CFBundleVersion $NEW_BUILD" "$PLIST"

@@ -493,7 +493,9 @@ final class HotkeyRecorderModel: ObservableObject {
     }
 
     private func handleKeyDown(keyCode code: Int64, cgFlags: CGEventFlags) -> Bool {
-        let mods = HotkeyBinding.normalize(cgFlags)
+        // Function-type keys (arrows, F-keys, Home/End…) carry an implicit fn flag on
+        // some keyboards but not others — strip it so the saved combo matches everywhere.
+        let mods = HotkeyBinding.normalizedModifiers(forKeyCode: code, flags: cgFlags)
         // Bare Escape cancels; Esc-with-modifiers is a legitimate combo.
         if code == 53 && mods == 0 {
             cancelRecording()

@@ -1,4 +1,5 @@
 import ApplicationServices
+import Carbon.HIToolbox
 import CoreGraphics
 import Foundation
 import LocalFlowKit
@@ -86,7 +87,7 @@ final class HotkeyMonitor {
         ) {
             canConsumeEvents = true
             install(tap)
-            EventLog.log("tap.created", ["mode": "active"])
+            EventLog.log("tap.created", ["mode": "active", "binding": binding.description])
             return true
         }
 
@@ -101,12 +102,13 @@ final class HotkeyMonitor {
         ) {
             canConsumeEvents = false
             install(tap)
-            EventLog.log("tap.created", ["mode": "listenOnly"])
+            EventLog.log("tap.created", ["mode": "listenOnly", "binding": binding.description])
             return true
         }
 
         EventLog.log("tap.failed", [
             "inputMonitoring": PermissionsManager.shared.inputMonitoringGranted ? "granted" : "denied",
+            "secureInput": IsSecureEventInputEnabled() ? "on" : "off",
         ])
         return false
     }

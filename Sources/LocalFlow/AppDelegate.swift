@@ -63,39 +63,54 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         if tapStarted {
-            // Recovered (or never stuck) — clear any pending one-time relaunch guard.
+            // Recovered (or never stuck) — clear the legacy one-time relaunch guard.
             UserDefaults.standard.removeObject(forKey: Self.pendingTapRelaunchKey)
         } else {
             // Without Input Monitoring the tap can't be created; poll and start it
-            // once granted. Separately, if Input Monitoring IS granted but the tap
-            // still won't create, the process is in the macOS "grant doesn't apply
-            // to the running process" state — only a relaunch fixes it.
+            // once granted. The retry loop also detects the macOS "grant doesn't
+            // apply to the running process" wedge and relaunches to cure it.
             startHotkeyRetry()
-            scheduleTapRelaunchIfStuck()
         }
+        syncHotkeyHealth()
     }
 
-    /// The macOS quirk: the FIRST time Input Monitoring is granted, a running
-    /// process often still can't create its event tap until it's relaunched. When
-    /// we detect that state (granted, but no tap after a few seconds), relaunch
-    /// ONCE — guarded by a flag so a genuinely-broken tap never loops. If the tap
-    /// still fails after that relaunch, we stop and let onboarding guide the user.
-    private static let pendingTapRelaunchKey = "pendingTapRelaunch"
-    private func scheduleTapRelaunchIfStuck() {
-        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
-            guard let self else { return }
-            guard !self.hotkeyMonitor.isRunning,
-                  PermissionsManager.shared.inputMonitoringGranted else { return }
-            if UserDefaults.standard.bool(forKey: Self.pendingTapRelaunchKey) {
-                // We already relaunched once and it's still stuck — don't loop.
+    /// The macOS quirk: the FIRST time Input Monitoring is granted, the already-
+    /// running process often still can't create its event tap — only a fresh
+    /// process can. The retry loop watches for that exact state (grant present,
+    /// restart still failing) and calls this. One auto-relaunch per process, and
+    /// only if the LAST auto-relaunch was over 10 minutes ago (persisted timestamp,
+    /// so a genuinely-broken machine never relaunch-loops). If a relaunch didn't
+    /// cure it, we stop and surface onboarding guidance instead.
+    private static let pendingTapRelaunchKey = "pendingTapRelaunch" // legacy boolean, cleared on success
+    private static let tapRelaunchAtKey = "tapRelaunchAt"
+    private var attemptedAutoRelaunch = false
+    private var shownStuckGuidance = false
+    private func attemptTapAutoRelaunch() {
+        guard !attemptedAutoRelaunch else { return }
+        attemptedAutoRelaunch = true
+        let now = Date().timeIntervalSince1970
+        let last = UserDefaults.standard.double(forKey: Self.tapRelaunchAtKey)
+        if now - last < 600 {
+            // The previous process already auto-relaunched into this one and the tap
+            // is STILL dead — relaunching again won't help. Guide the user instead.
+            if !shownStuckGuidance {
+                shownStuckGuidance = true
                 EventLog.log("tap.autorelaunch", ["result": "stillStuck-showingGuidance"])
-                self.showOnboarding()
-                return
+                showOnboarding()
             }
-            UserDefaults.standard.set(true, forKey: Self.pendingTapRelaunchKey)
-            EventLog.log("tap.autorelaunch", ["result": "relaunching"])
-            self.relaunch()
+            return
         }
+        UserDefaults.standard.set(now, forKey: Self.tapRelaunchAtKey)
+        EventLog.log("tap.autorelaunch", ["result": "relaunching"])
+        relaunch()
+    }
+
+    /// Publishes the "wedged" state — Input Monitoring granted but no tap — so the
+    /// menu bar can show a warning with a one-click fix instead of looking normal
+    /// while the shortcut is silently dead.
+    private func syncHotkeyHealth() {
+        let wedged = !hotkeyMonitor.isRunning && PermissionsManager.shared.inputMonitoringGranted
+        AppState.shared.setHotkeyActive(!wedged)
     }
 
     /// Fired when the user clicks the Dock icon (when shown) or double-clicks the app
@@ -178,6 +193,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 onModelChanged: { AppState.shared.reloadEngine() },
                 onHotkeyChanged: { [weak self] in
                     self?.hotkeyMonitor.restart()
+                    self?.syncHotkeyHealth()
                     AppState.shared.refreshHotkeyBinding()
                 },
                 onPartialsChanged: { AppState.shared.reloadPartials() },
@@ -221,27 +237,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if PermissionsManager.shared.inputMonitoringGranted && !hotkeyMonitor.isRunning {
             hotkeyMonitor.restart()
         }
+        syncHotkeyHealth()
     }
+
+    /// Consecutive retry ticks where Input Monitoring was granted but the tap still
+    /// failed to create. Three in a row (~6 s of granted-but-dead) is the wedge.
+    private var grantedTapFailures = 0
 
     private func startHotkeyRetry() {
         hotkeyRetryTimer?.invalidate()
+        grantedTapFailures = 0
         hotkeyRetryTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] timer in
             guard let self else { timer.invalidate(); return }
             MainActor.assumeIsolated {
-                guard PermissionsManager.shared.inputMonitoringGranted else { return }
+                guard PermissionsManager.shared.inputMonitoringGranted else {
+                    self.grantedTapFailures = 0
+                    return
+                }
                 self.hotkeyMonitor.restart()
+                self.syncHotkeyHealth()
                 if self.hotkeyMonitor.isRunning {
                     timer.invalidate()
                     self.hotkeyRetryTimer = nil
+                    self.grantedTapFailures = 0
                     UserDefaults.standard.removeObject(forKey: Self.pendingTapRelaunchKey)
+                } else {
+                    // Granted, restarted, still no tap: the running process can't use
+                    // the fresh grant (macOS applies it only to NEW processes). After
+                    // three consecutive failures, relaunch to pick the grant up.
+                    self.grantedTapFailures += 1
+                    if self.grantedTapFailures >= 3 {
+                        self.attemptTapAutoRelaunch()
+                    }
                 }
             }
         }
     }
 
-    // MARK: - Relaunch (used after granting permissions that require a restart)
+    // MARK: - Relaunch (used after granting permissions that require a restart,
+    // and by the menu bar's "Fix Now" button when the shortcut is wedged)
 
-    private func relaunch() {
+    func relaunch() {
         let path = Bundle.main.bundlePath
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/open")

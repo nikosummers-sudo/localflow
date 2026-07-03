@@ -7,6 +7,15 @@ struct LocalFlowApp: App {
 
     var body: some Scene {
         MenuBarExtra {
+            if !appState.hotkeyActive {
+                Text("⚠️ Shortcut inactive — LocalFlow can't see the keyboard")
+                    .disabled(true)
+                Button("Fix Now (Relaunch LocalFlow)") {
+                    appDelegate.relaunch()
+                }
+                Divider()
+            }
+
             Text(appState.statusMenuText)
                 .disabled(true)
             Text(appState.hotkeyBinding.menuHint)
@@ -41,7 +50,7 @@ struct LocalFlowApp: App {
             }
             .keyboardShortcut("q")
         } label: {
-            Image(systemName: appState.status.symbolName)
+            Image(systemName: appState.hotkeyActive ? appState.status.symbolName : "exclamationmark.triangle")
         }
     }
 }
