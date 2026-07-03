@@ -278,6 +278,19 @@ final class AppState: ObservableObject {
         Task { await preloadEngine() }
     }
 
+    /// Thread-safe resume-once guard for hand-rolled continuation races.
+    private final class ResumeOnce: @unchecked Sendable {
+        private let lock = NSLock()
+        private var claimed = false
+        /// Returns true exactly once, for exactly one caller.
+        func claim() -> Bool {
+            lock.lock(); defer { lock.unlock() }
+            if claimed { return false }
+            claimed = true
+            return true
+        }
+    }
+
     /// Whether the configured model's files already exist on disk — a cached
     /// model loads in well under 90s, so a longer wait means the load is hung,
     /// not slow. (Heuristic path; WhisperKit's layout, verified from source.)
@@ -301,15 +314,21 @@ final class AppState: ObservableObject {
         setStatus(.loadingModel(engineHasLoadedOnce ? nil : "Downloading speech model… (first run)"))
         let budget: Double = modelLikelyCached() ? 90 : 900  // download runs need real time
         let engineRef = engine
-        let raceWon = await withTaskGroup(of: Bool.self) { group in
-            group.addTask { (try? await engineRef.preload()) != nil }
-            group.addTask {
-                try? await Task.sleep(nanoseconds: UInt64(budget * 1_000_000_000))
-                return false
+        // First-resumer-wins race. NOT withTaskGroup: a task group refuses to
+        // return until every child finishes, so a hung preload child would hold
+        // the "timed-out" group hostage — the timeout could never escape the very
+        // hang it exists to escape. The losing task here is simply abandoned
+        // (the wedged chain is discarded by reloadEngine below anyway).
+        let raceWon = await withCheckedContinuation { (cont: CheckedContinuation<Bool, Never>) in
+            let resumed = ResumeOnce()
+            Task {
+                let ok = (try? await engineRef.preload()) != nil
+                if resumed.claim() { cont.resume(returning: ok) }
             }
-            let first = await group.next() ?? false
-            group.cancelAll()  // stops the WAIT; a hung preload itself isn't cancellable
-            return first
+            Task {
+                try? await Task.sleep(nanoseconds: UInt64(budget * 1_000_000_000))
+                if resumed.claim() { cont.resume(returning: false) }
+            }
         }
         if raceWon, await engine.isReady {
             engineHasLoadedOnce = true
@@ -682,11 +701,13 @@ final class AppState: ObservableObject {
             // Finish any in-flight partial before the authoritative final pass so
             // the two never run concurrently.
             await partials?.stop()
+            EventLog.log("pipeline.stage", ["at": "partialsStopped"])
 
             // Stop the supervisor and let any in-flight chunk finish committing so
             // `committedChunkCount` and the tail range are final.
             supervisor?.cancel()
             _ = await supervisor?.value
+            EventLog.log("pipeline.stage", ["at": "supervisorDone"])
 
             // Never show "Transcribing…" while the model is still loading: surface
             // the loading status and wait (bounded) for the engine to be ready.
@@ -696,13 +717,16 @@ final class AppState: ObservableObject {
                 partialText = ""
                 return
             }
+            EventLog.log("pipeline.stage", ["at": "engineReady"])
 
             guard let transcriber, let source else {
+                EventLog.log("pipeline.stage", ["at": "singlePass.noStreamHandles"])
                 await runTranscription(finalSamples)
                 return
             }
 
             let committed = await transcriber.committedChunkCount
+            EventLog.log("pipeline.stage", ["at": "committedCount", "n": String(committed)])
             guard committed > 0 else {
                 // Released before the first chunk committed → EXACTLY the existing
                 // single-pass path (one STT + one cleanup).
@@ -734,6 +758,7 @@ final class AppState: ObservableObject {
     /// cleanup, then insertion. Used for short dictations and when streaming
     /// wasn't active.
     private func runTranscription(_ samples: [Float]) async {
+        EventLog.log("pipeline.stage", ["at": "singlePass.enter", "samples": String(samples.count)])
         // Single-pass silence guard (both single-pass entry points route here).
         // A recording with no audible speech is the true-silence case behind the
         // "it only typed 'you'" reports: don't transcribe it, don't insert, don't
@@ -747,35 +772,47 @@ final class AppState: ObservableObject {
             setStatus(.error(silenceMessage))
             return
         }
-        do {
-            let sttText = try await engine.transcribe(samples: samples)
-            guard !sttText.isEmpty else {
-                partialText = ""
-                setStatus(.idle)
-                return
-            }
-
-            // Encode command phrases on the RAW transcript, before cleanup runs.
-            let raw = voiceCommandsEnabled() ? encodeCommands(sttText) : sttText
-
-            // Optional meaning-preserving cleanup. Gated by the effective (per-app
-            // aware) flag; falls back to raw on any issue, with `note` explaining why.
-            var finalText = raw
-            var note: String?
-            if effectiveCleanupEnabled(), raw.count >= TranscriptCleaner.minLength {
-                setStatus(.cleaning)
-                let cleaned = await cleaner.clean(raw, context: makeCleanupContext())
-                finalText = cleaned.text
-                note = cleaned.note
-                EventLog.log("cleanup", ["path": "single-pass", "result": note == nil ? "ok" : "fallback"])
-            }
-
-            await finishInsertion(text: finalText, note: note)
-        } catch {
-            EventLog.log("stt.failed", ["path": "single-pass", "error": String(describing: error)])
-            partialText = ""
-            setStatus(.error(error.localizedDescription))
+        // Watchdog + fresh-engine retry: a CoreML/ANE-level stall (sample-confirmed
+        // in the wild) can hang a transcription forever and poison the serial
+        // chain. Time it out, discard the wedged engine, retry once on a fresh one
+        // (which reloads the model, hence the larger second budget).
+        var sttResult = await engine.transcribeOrTimeout(samples: samples, seconds: 30)
+        if sttResult == nil {
+            EventLog.log("stt.stalled", ["path": "single-pass", "action": "freshEngineRetry"])
+            setStatus(.loadingModel("Recovering speech engine…"))
+            reloadEngine()
+            sttResult = await engine.transcribeOrTimeout(samples: samples, seconds: 120)
         }
+        guard let sttText = sttResult else {
+            EventLog.log("stt.failed", ["path": "single-pass", "error": "stalled twice"])
+            partialText = ""
+            setStatus(.error("Transcription stalled — please dictate that again"))
+            return
+        }
+        guard !sttText.isEmpty else {
+            // NEVER a silent drop: an empty decode must tell the user (and the log).
+            EventLog.log("stt.empty", ["path": "single-pass", "samples": String(samples.count)])
+            partialText = ""
+            setStatus(.error("Didn't catch that — try dictating again"))
+            return
+        }
+
+        // Encode command phrases on the RAW transcript, before cleanup runs.
+        let raw = voiceCommandsEnabled() ? encodeCommands(sttText) : sttText
+
+        // Optional meaning-preserving cleanup. Gated by the effective (per-app
+        // aware) flag; falls back to raw on any issue, with `note` explaining why.
+        var finalText = raw
+        var note: String?
+        if effectiveCleanupEnabled(), raw.count >= TranscriptCleaner.minLength {
+            setStatus(.cleaning)
+            let cleaned = await cleaner.clean(raw, context: makeCleanupContext())
+            finalText = cleaned.text
+            note = cleaned.note
+            EventLog.log("cleanup", ["path": "single-pass", "result": note == nil ? "ok" : "fallback"])
+        }
+
+        await finishInsertion(text: finalText, note: note)
     }
 
     /// Retains the final text, inserts it at the cursor, and drives the closing

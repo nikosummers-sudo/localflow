@@ -1,4 +1,17 @@
 import Foundation
+import LocalFlowKit
+
+/// Thread-safe claim-once flag for continuation races.
+final class OnceFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var claimed = false
+    func claim() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        if claimed { return false }
+        claimed = true
+        return true
+    }
+}
 
 /// Serializes every call to a single underlying transcription engine so the main
 /// WhisperKit model never runs two transcriptions concurrently — a streaming
@@ -29,6 +42,28 @@ public actor SerialTranscriptionEngine {
 
     public func transcribe(samples: [Float]) async throws -> String {
         try await run { try await self.engine.transcribe(samples: samples) }
+    }
+
+    /// Watchdog: races the serialized transcription against a wall-clock limit.
+    /// A CoreML/ANE-level stall (observed in the wild; thread sample showed the
+    /// call parked in ANEServices forever) otherwise wedges the FIFO chain and
+    /// silently eats every later dictation. nil = timed out or threw — treat
+    /// THIS ENGINE as poisoned and discard it for a fresh one.
+    public nonisolated func transcribeOrTimeout(samples: [Float], seconds: Double) async -> String? {
+        await withCheckedContinuation { (cont: CheckedContinuation<String?, Never>) in
+            let once = OnceFlag()
+            Task {
+                let text = try? await self.transcribe(samples: samples)
+                if once.claim() { cont.resume(returning: text) }
+            }
+            Task {
+                try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                if once.claim() {
+                    EventLog.log("stt.watchdog", ["timeoutS": String(Int(seconds))])
+                    cont.resume(returning: nil)
+                }
+            }
+        }
     }
 
     /// Runs `operation` only after every previously-enqueued operation has fully

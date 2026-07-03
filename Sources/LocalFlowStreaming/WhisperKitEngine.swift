@@ -38,6 +38,12 @@ public final class WhisperKitEngine: TranscriptionEngine {
     }
 
     public func preload() async throws {
+        // IDEMPOTENT: the engine loads at most once. Callers retry/race preload
+        // freely (launch, the dictation readiness gate) — without this guard,
+        // every extra call reloaded the full model and occupied the serial
+        // chain for ~40s each, so dictations made while the model was loading
+        // appeared to vanish. Model changes use a fresh engine (reloadEngine).
+        guard whisperKit == nil else { return }
         do {
             whisperKit = try await makeWhisperKit(model: requestedModel)
             loadedModel = requestedModel
@@ -59,7 +65,7 @@ public final class WhisperKitEngine: TranscriptionEngine {
     private func warmUp() async {
         guard let whisperKit else { return }
         let silence = [Float](repeating: 0, count: 16000)
-        _ = try? await whisperKit.transcribe(audioArray: silence, decodeOptions: decodingOptions())
+        _ = try? await whisperKit.transcribe(audioArray: silence, decodeOptions: decodingOptions(promptTokens: nil))
     }
 
     public func transcribe(samples: [Float]) async throws -> String {
@@ -72,21 +78,39 @@ public final class WhisperKitEngine: TranscriptionEngine {
             engine = ready
         }
 
-        let results = try await engine.transcribe(audioArray: samples, decodeOptions: decodingOptions())
-        let joined = results.map(\.text).joined(separator: " ")
-        return WhisperKitEngine.clean(joined)
+        let prompt = vocabularyPromptTokens()
+        let results = try await engine.transcribe(
+            audioArray: samples, decodeOptions: decodingOptions(promptTokens: prompt)
+        )
+        var text = WhisperKitEngine.clean(results.map(\.text).joined(separator: " "))
+
+        // A vocabulary prompt can drive Whisper's decoder straight to end-of-text
+        // on SHORT clips, yielding an empty transcription (field-observed: short
+        // dictations "vanished" once the personal dictionary had its first term).
+        // Decode once more without the prompt — dictionary bias is a nice-to-have;
+        // the user's words are not.
+        if text.isEmpty, prompt != nil {
+            EventLog.log("stt.emptyWithPrompt", [
+                "samples": String(samples.count), "action": "retryNoPrompt",
+            ])
+            let retry = try await engine.transcribe(
+                audioArray: samples, decodeOptions: decodingOptions(promptTokens: nil)
+            )
+            text = WhisperKitEngine.clean(retry.map(\.text).joined(separator: " "))
+        }
+        return text
     }
 
     /// Decoding options tuned for dictation latency:
     ///  - `withoutTimestamps` skips generating timestamp tokens we never use.
     ///  - `chunkingStrategy: .vad` splits long audio at silence and decodes the
     ///    chunks concurrently — a large win on long, hands-free dictations.
-    private func decodingOptions() -> DecodingOptions {
+    private func decodingOptions(promptTokens: [Int]?) -> DecodingOptions {
         DecodingOptions(
             task: .transcribe,
             skipSpecialTokens: true,
             withoutTimestamps: true,
-            promptTokens: vocabularyPromptTokens(),
+            promptTokens: promptTokens,
             chunkingStrategy: .vad
         )
     }

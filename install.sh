@@ -42,6 +42,8 @@ cd "$SRC"
 # ── 4. Per-machine signing cert (keeps macOS permissions stable across updates)
 bash Scripts/setup-signing.sh || \
   echo "⚠️  Skipped stable signing — LocalFlow still works, but macOS may re-ask for permissions after updates."
+SIGNING_OK="no"
+security find-identity -v -p codesigning 2>/dev/null | grep -q "LocalFlow Dev Signing" && SIGNING_OK="yes"
 
 # ── 5. Build and install ─────────────────────────────────────────────────────
 bold "Building LocalFlow (first build fetches dependencies — give it a few minutes)…"
@@ -221,11 +223,18 @@ else
   APP_SUMMARY="✗ installed but not running — Cmd+Space, type LocalFlow, press Return"
 fi
 
+if [ "$SIGNING_OK" = "yes" ]; then
+  SIGNING_SUMMARY="✓"
+else
+  SIGNING_SUMMARY="✗ NOT set up — permissions will RESET on every update! Re-run this installer and approve the certificate password dialog."
+fi
+
 printf '\n'
 echo "────────────────────────────────────────────────────────────"
 echo "LocalFlow install summary"
 echo "  App installed & running:  ${APP_SUMMARY}"
 echo "  Auto-updates:             ✓"
+echo "  Permission-stable signing: ${SIGNING_SUMMARY}"
 echo "  AI cleanup (Ollama):      ${AI_SUMMARY}"
 echo "  Next: grant the 3 permissions in the Setup window."
 echo "────────────────────────────────────────────────────────────"
