@@ -366,6 +366,18 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// Rebuilds capture against a newly-chosen input device (Settings mic picker).
+    func reconfigureInputDevice() {
+        guard !status.isRecording else { return }
+        if recorder.isCapturing {
+            recorder.reconfigureInputDevice()
+        } else {
+            // Not continuously capturing (instant capture off / mic ungranted):
+            // the next dictation opens the engine and picks up the new device.
+            refreshContinuousCapture()
+        }
+    }
+
     /// Reacts to a Microphone-permission change (called from every permission hook:
     /// onboarding's poll, and the in-dictation request prompt). On a false→true
     /// transition the audio engine — if it was already running — is still feeding

@@ -1,4 +1,5 @@
 import AppKit
+import LocalFlowKit
 import SwiftUI
 
 @MainActor
@@ -61,9 +62,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             showOnboarding()
         }
 
-        // Without Input Monitoring the tap can't be created; poll and start it once granted.
-        if !tapStarted {
+        if tapStarted {
+            // Recovered (or never stuck) — clear any pending one-time relaunch guard.
+            UserDefaults.standard.removeObject(forKey: Self.pendingTapRelaunchKey)
+        } else {
+            // Without Input Monitoring the tap can't be created; poll and start it
+            // once granted. Separately, if Input Monitoring IS granted but the tap
+            // still won't create, the process is in the macOS "grant doesn't apply
+            // to the running process" state — only a relaunch fixes it.
             startHotkeyRetry()
+            scheduleTapRelaunchIfStuck()
+        }
+    }
+
+    /// The macOS quirk: the FIRST time Input Monitoring is granted, a running
+    /// process often still can't create its event tap until it's relaunched. When
+    /// we detect that state (granted, but no tap after a few seconds), relaunch
+    /// ONCE — guarded by a flag so a genuinely-broken tap never loops. If the tap
+    /// still fails after that relaunch, we stop and let onboarding guide the user.
+    private static let pendingTapRelaunchKey = "pendingTapRelaunch"
+    private func scheduleTapRelaunchIfStuck() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
+            guard let self else { return }
+            guard !self.hotkeyMonitor.isRunning,
+                  PermissionsManager.shared.inputMonitoringGranted else { return }
+            if UserDefaults.standard.bool(forKey: Self.pendingTapRelaunchKey) {
+                // We already relaunched once and it's still stuck — don't loop.
+                EventLog.log("tap.autorelaunch", ["result": "stillStuck-showingGuidance"])
+                self.showOnboarding()
+                return
+            }
+            UserDefaults.standard.set(true, forKey: Self.pendingTapRelaunchKey)
+            EventLog.log("tap.autorelaunch", ["result": "relaunching"])
+            self.relaunch()
         }
     }
 
@@ -157,7 +188,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     AppState.shared.healCleanupModelIfNeeded()
                 },
                 onInstantCaptureChanged: { AppState.shared.refreshContinuousCapture() },
-                onDockVisibilityChanged: { [weak self] visible in self?.setDockVisible(visible) }
+                onDockVisibilityChanged: { [weak self] visible in self?.setDockVisible(visible) },
+                onInputDeviceChanged: { AppState.shared.reconfigureInputDevice() }
             )
             settingsWindow = makeWindow(title: "LocalFlow Settings", width: 520, height: 640, content: view)
         }
@@ -201,6 +233,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 if self.hotkeyMonitor.isRunning {
                     timer.invalidate()
                     self.hotkeyRetryTimer = nil
+                    UserDefaults.standard.removeObject(forKey: Self.pendingTapRelaunchKey)
                 }
             }
         }

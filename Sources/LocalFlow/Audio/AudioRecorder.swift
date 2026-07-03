@@ -112,6 +112,12 @@ final class AudioRecorder {
         engineLock.lock()
         let rate = engine.inputNode.inputFormat(forBus: 0).sampleRate
         engineLock.unlock()
+        // Report the SELECTED device when the user picked one, else the default —
+        // so the log names the mic actually in use.
+        let uid = UserDefaults.standard.string(forKey: "inputDeviceUID") ?? ""
+        if !uid.isEmpty, let picked = InputDevices.all().first(where: { $0.uid == uid }) {
+            return (picked.name, rate)
+        }
         return (Self.defaultInputDeviceName(), rate)
     }
 
@@ -281,6 +287,7 @@ final class AudioRecorder {
 
     private func installTapLocked() throws {
         let input = engine.inputNode
+        applySelectedInputDeviceLocked()
         let inputFormat = input.inputFormat(forBus: 0)
 
         guard let targetFormat = AVAudioFormat(
@@ -302,6 +309,42 @@ final class AudioRecorder {
         guard tapInstalled else { return }
         engine.inputNode.removeTap(onBus: 0)
         tapInstalled = false
+    }
+
+    /// Binds the engine's input to the user's chosen device (UserDefaults
+    /// "inputDeviceUID"; empty = system default). Must run before the tap reads
+    /// the input format and before the engine starts. On any failure it silently
+    /// leaves the system default in place — a wrong-device paste beats no capture.
+    private func applySelectedInputDeviceLocked() {
+        let uid = UserDefaults.standard.string(forKey: "inputDeviceUID") ?? ""
+        guard !uid.isEmpty else { return }
+        guard let deviceID = InputDevices.deviceID(forUID: uid),
+              let unit = engine.inputNode.audioUnit else {
+            EventLog.log("input.device", ["uid": uid, "result": "unresolved-default"])
+            return
+        }
+        var dev = AudioDeviceID(deviceID)
+        let status = AudioUnitSetProperty(
+            unit, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0,
+            &dev, UInt32(MemoryLayout<AudioDeviceID>.size))
+        EventLog.log("input.device", ["uid": uid, "result": status == noErr ? "set" : "failed"])
+    }
+
+    /// Rebuilds capture against the newly-selected input device (from the Settings
+    /// picker). Safe no-op when not continuously capturing or mid-dictation.
+    func reconfigureInputDevice() {
+        engineLock.lock()
+        defer { engineLock.unlock() }
+        guard captureMode, !dictating else { return }
+        removeTapLocked()
+        engine.stop()
+        do {
+            try installTapLocked()
+            try startEngineLocked()
+        } catch {
+            captureMode = false
+            EventLog.log("engine.restart", ["reason": "device-change", "result": "failed"])
+        }
     }
 
     private func startEngineLocked() throws {

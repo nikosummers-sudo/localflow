@@ -413,6 +413,16 @@ Menu bar → **Settings…**:
   automatically; if an app still refuses, set **Insertion: Always paste** for it in
   Settings → Apps (the Claude desktop app comes pre-configured). Your text is always on the
   clipboard as a last resort — ⌘V pastes it.
+- **The dictation shortcut does nothing, even after granting Input Monitoring.** macOS
+  sometimes doesn't apply a fresh Input Monitoring grant to the already-running app, so the
+  global key listener can't start. LocalFlow detects this and reopens itself once to finish
+  setup; if the shortcut still doesn't work, quit LocalFlow (menu bar icon → Quit) and open it
+  again. If it's still dead, try recording a different shortcut in Settings → General (in case
+  another app has claimed that key).
+- **Wrong microphone / an external mic isn't being heard.** LocalFlow uses your system-default
+  input unless you tell it otherwise. Pick your mic in Settings → General → Microphone → Input
+  device. (First check System Settings → Sound → Input shows the level moving when you talk —
+  if it doesn't there, it's the mic or another app holding it, not LocalFlow.)
 - **Why is the orange microphone indicator always on?** That dot is macOS's privacy
   indicator, shown whenever any app has the microphone open. LocalFlow keeps the mic open
   for **instant capture** (dictation starts instantly, first words never clipped). While

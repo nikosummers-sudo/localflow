@@ -86,6 +86,7 @@ final class HotkeyMonitor {
         ) {
             canConsumeEvents = true
             install(tap)
+            EventLog.log("tap.created", ["mode": "active"])
             return true
         }
 
@@ -100,9 +101,13 @@ final class HotkeyMonitor {
         ) {
             canConsumeEvents = false
             install(tap)
+            EventLog.log("tap.created", ["mode": "listenOnly"])
             return true
         }
 
+        EventLog.log("tap.failed", [
+            "inputMonitoring": PermissionsManager.shared.inputMonitoringGranted ? "granted" : "denied",
+        ])
         return false
     }
 

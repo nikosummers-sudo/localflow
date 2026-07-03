@@ -73,6 +73,7 @@ struct SettingsView: View {
     let onCleanupChanged: () -> Void
     let onInstantCaptureChanged: () -> Void
     let onDockVisibilityChanged: (Bool) -> Void
+    let onInputDeviceChanged: () -> Void
 
     @StateObject private var vm = DictionaryViewModel()
 
@@ -84,7 +85,8 @@ struct SettingsView: View {
                 onPartialsChanged: onPartialsChanged,
                 onCleanupChanged: onCleanupChanged,
                 onInstantCaptureChanged: onInstantCaptureChanged,
-                onDockVisibilityChanged: onDockVisibilityChanged
+                onDockVisibilityChanged: onDockVisibilityChanged,
+                onInputDeviceChanged: onInputDeviceChanged
             )
             .tabItem { Label("General", systemImage: "gearshape") }
 
@@ -108,8 +110,11 @@ private struct GeneralTab: View {
     let onCleanupChanged: () -> Void
     let onInstantCaptureChanged: () -> Void
     let onDockVisibilityChanged: (Bool) -> Void
+    let onInputDeviceChanged: () -> Void
 
     @AppStorage("modelName") private var modelName = defaultModelName
+    @AppStorage("inputDeviceUID") private var inputDeviceUID = ""
+    @State private var inputDevices: [InputDevice] = []
     @AppStorage("launchAtLogin") private var launchAtLogin = true
     @AppStorage("showInDock") private var showInDock = true
     @AppStorage("restoreClipboard") private var restoreClipboard = true
@@ -167,6 +172,14 @@ private struct GeneralTab: View {
             }
 
             Section("Microphone") {
+                Picker("Input device", selection: $inputDeviceUID) {
+                    Text("System Default").tag("")
+                    ForEach(inputDevices) { Text($0.name).tag($0.uid) }
+                }
+                Text("Pick your mic if the wrong one is being used — e.g. an external mic that isn't the system default.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+
                 Toggle("Instant capture (keeps mic warm)", isOn: $instantCapture)
                 Text("Keeps the microphone open so dictation starts instantly and never clips your first words. Audio spoken outside a dictation lives only in a rolling 2-second in-memory buffer that is continuously discarded — it is never processed, stored, or transmitted. While LocalFlow runs, macOS shows the microphone-in-use indicator. Turn this off to only open the mic while you dictate (dictation may then clip the very start).")
                     .font(.caption)
@@ -215,6 +228,8 @@ private struct GeneralTab: View {
         .onChange(of: cleanupEnabled) { _, _ in onCleanupChanged() }
         .onChange(of: cleanupModel) { _, _ in onCleanupChanged() }
         .onChange(of: instantCapture) { _, _ in onInstantCaptureChanged() }
+        .onChange(of: inputDeviceUID) { _, _ in onInputDeviceChanged() }
+        .onAppear { inputDevices = InputDevices.all() }
     }
 }
 

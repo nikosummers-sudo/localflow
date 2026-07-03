@@ -17,6 +17,18 @@ func check(_ name: String, _ condition: Bool) {
     if !condition { failures += 1 }
 }
 
+// MARK: - Input device enumeration (proves the CoreAudio path finds real devices)
+
+if CommandLine.arguments.contains("--devices") {
+    let devices = InputDevices.all()
+    print("INPUT DEVICES (\(devices.count)):")
+    for d in devices {
+        print("  \(d.name)  [uid=\(d.uid)]  id=\(d.id)")
+    }
+    print(devices.isEmpty ? "DEVICES: NONE FOUND" : "DEVICES: OK")
+    exit(devices.isEmpty ? 1 : 0)
+}
+
 // MARK: - Store round-trip (writes to a scratch dir, prints the JSON schema)
 
 if CommandLine.arguments.contains("--store") {
