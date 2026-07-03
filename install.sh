@@ -60,18 +60,6 @@ if [ -z "$OLLAMA_BIN" ] && [ -x "/Applications/Ollama.app/Contents/Resources/oll
   OLLAMA_BIN="/Applications/Ollama.app/Contents/Resources/ollama"
 fi
 
-# Prompt on the real terminal — works under `curl | bash` (stdin is the pipe).
-# No terminal (unattended run) → return 1 so we never surprise-download.
-ask_yes() {
-  local reply
-  if [ -r /dev/tty ] && [ -w /dev/tty ]; then
-    printf '%s [Y/n] ' "$1" >/dev/tty
-    read -r reply </dev/tty || reply=""
-    case "$reply" in [Nn]*) return 1 ;; *) return 0 ;; esac
-  fi
-  return 1
-}
-
 wait_for_ollama() {
   local i
   for i in $(seq 1 30); do
@@ -81,41 +69,47 @@ wait_for_ollama() {
   return 1
 }
 
+ollama_setup_note() {
+  echo "⚠️  Couldn't finish the AI-cleanup setup — dictation still works (transcripts inserted as heard)."
+  echo "   To add it later: install Ollama from https://ollama.com then run: ollama pull gemma3:4b"
+}
+
+# AI cleanup is part of the package — install Ollama when it's missing.
+# A failure here must never break the LocalFlow install itself.
 if [ -z "$OLLAMA_BIN" ]; then
-  bold "Optional: AI transcript cleanup — removes filler words and false starts, 100% on-device."
-  echo "Dictation works fine without it; transcripts are just inserted as heard."
-  if ask_yes "Install Ollama and the cleanup model now (~3.5 GB total, one-time)?"; then
-    if command -v brew >/dev/null 2>&1; then
-      bold "Installing Ollama via Homebrew…"
-      brew install ollama
+  bold "Setting up AI transcript cleanup (Ollama, one-time)…"
+  if command -v brew >/dev/null 2>&1; then
+    if brew install ollama; then
       brew services start ollama 2>/dev/null || { nohup ollama serve >/dev/null 2>&1 & }
       OLLAMA_BIN="$(command -v ollama || true)"
     else
-      bold "Downloading Ollama…"
-      OZIP="$(mktemp -d)/Ollama-darwin.zip"
-      curl -fL --progress-bar https://ollama.com/download/Ollama-darwin.zip -o "$OZIP"
-      ditto -x -k "$OZIP" /Applications
+      ollama_setup_note
+    fi
+  else
+    OZIP="$(mktemp -d)/Ollama-darwin.zip"
+    if curl -fL --progress-bar https://ollama.com/download/Ollama-darwin.zip -o "$OZIP" \
+       && ditto -x -k "$OZIP" /Applications; then
       rm -f "$OZIP"
       open -a /Applications/Ollama.app
       echo "If Ollama shows a welcome window, click through it — it starts the local server."
       OLLAMA_BIN="/Applications/Ollama.app/Contents/Resources/ollama"
+    else
+      rm -f "$OZIP"
+      ollama_setup_note
     fi
-  else
-    echo "Skipped. To enable later: install Ollama from https://ollama.com then run: ollama pull gemma3:4b"
   fi
 fi
 
 if [ -n "$OLLAMA_BIN" ]; then
   if wait_for_ollama; then
     if "$OLLAMA_BIN" list 2>/dev/null | grep -q '^gemma3:4b'; then
-      echo "✓ Ollama with gemma3:4b found — AI cleanup is ready."
+      echo "✓ AI cleanup is ready (Ollama with gemma3:4b)."
     else
       bold "Downloading the cleanup model (gemma3:4b, ~3.3 GB, one-time)…"
-      "$OLLAMA_BIN" pull gemma3:4b || \
-        echo "⚠️  Model download didn't finish — run 'ollama pull gemma3:4b' later. Dictation works without it."
+      "$OLLAMA_BIN" pull gemma3:4b || ollama_setup_note
     fi
   else
-    echo "⚠️  Ollama isn't responding yet. Once it's running, run: ollama pull gemma3:4b"
+    ollama_setup_note
   fi
 fi
 
