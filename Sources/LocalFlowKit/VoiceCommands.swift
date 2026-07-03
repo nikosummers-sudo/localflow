@@ -24,7 +24,24 @@ public func encodeCommands(_ text: String) -> String {
     // phrases do not overlap, so the result is the same either way.
     s = replacePhrase(s, phrase: "new paragraph", with: VoiceCommand.newParagraphPlaceholder)
     s = replacePhrase(s, phrase: "new line", with: VoiceCommand.newLinePlaceholder)
-    s = replacePhrase(s, phrase: "scratch that", with: VoiceCommand.scratchPlaceholder)
+    // Scratch tolerates how people (and Whisper) actually produce it:
+    //  - "scratch that" / "scrap that" — imperatives, unambiguous, fire always.
+    //  - "scratched/scrapped that" — Whisper routinely past-tenses the spoken
+    //    command (field-reported), but the past tense is also real content
+    //    ("we scratched that idea"), so it fires ONLY with an explicit restart
+    //    phrase attached.
+    //  - A trailing "let me start again/over" is command language, not content —
+    //    consumed along with the command in every variant.
+    s = replacePattern(
+        s,
+        pattern: "\\b(?:scratch|scrap) that\\b[.,]?(?:\\s+(?:so\\s+)?let me (?:start|try) (?:again|over)\\b[.,]?)?",
+        with: VoiceCommand.scratchPlaceholder
+    )
+    s = replacePattern(
+        s,
+        pattern: "\\b(?:scratched|scrapped) that\\b[.,]?\\s+(?:so\\s+)?let me (?:start|try) (?:again|over)\\b[.,]?",
+        with: VoiceCommand.scratchPlaceholder
+    )
     // Deterministic list formatting: "new bullet" starts a "- " line, exactly,
     // every time — no model judgment involved. Deliberately NOT "bullet point":
     // that phrase appears constantly in normal speech ("make a bullet point
@@ -36,7 +53,12 @@ public func encodeCommands(_ text: String) -> String {
 
 private func replacePhrase(_ text: String, phrase: String, with placeholder: String) -> String {
     let escaped = NSRegularExpression.escapedPattern(for: phrase)
-    let pattern = "\\b\(escaped)\\b[.,]?"
+    return replacePattern(text, pattern: "\\b\(escaped)\\b[.,]?", with: placeholder)
+}
+
+/// Raw-regex variant for commands whose spoken/transcribed forms vary (tense,
+/// attached restart phrases). Case-insensitive, like `replacePhrase`.
+private func replacePattern(_ text: String, pattern: String, with placeholder: String) -> String {
     guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { return text }
     let range = NSRange(text.startIndex..<text.endIndex, in: text)
     let template = NSRegularExpression.escapedTemplate(for: placeholder)

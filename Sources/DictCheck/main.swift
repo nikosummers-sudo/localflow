@@ -722,6 +722,28 @@ do {
           encodeCommands(content) == content)
 }
 
+// Scratch tolerance — Whisper past-tenses the spoken command (field-reported:
+// "scratch that let me start again" transcribed as "scratched that let me
+// start again" and sailed through as content).
+do {
+    let S = VoiceCommand.scratchPlaceholder
+    check("'scratch that' fires",
+          encodeCommands("bad idea scratch that good idea").contains(S))
+    check("'scrap that' fires",
+          encodeCommands("bad idea scrap that good idea").contains(S))
+    check("past-tensed 'scratched that let me start again' fires (the field case)",
+          encodeCommands("the four AI scores that actually scratched that let me start again these look good").contains(S))
+    check("restart phrase is consumed with the command [\(show(encodeCommands("bad scratch that let me start again good")))]",
+          encodeCommands("bad scratch that let me start again good") == "bad \(S) good")
+    check("'we scratched that idea' as content is NOT a command",
+          !encodeCommands("we scratched that idea last week and moved on").contains(S))
+    // End-to-end: the retraction actually deletes the abandoned sentence.
+    let out = normalizeAfterCommands(decodeCommands(encodeCommands(
+        "hey these immediately look broken to me scratch that let me start again these look good to me")))
+    check("scratch retracts the abandoned run [\(show(out))]",
+          out == "these look good to me")
+}
+
 // MARK: - Newline-preserving normalization
 
 check("inline normalize collapses spaces but preserves newlines [\(show(normalizeInlineWhitespace("a  b\nc   d")))]",
