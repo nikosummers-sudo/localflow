@@ -45,6 +45,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         UserDefaults.standard.set(build, forKey: "lastSeenBuild")
 
+        // Keep the machine's auto-updater current: each release bundles its own
+        // auto-update.sh (inside the signed app), and we sync it over the copy the
+        // LaunchAgent runs. Without this, updater fixes would never reach machines
+        // installed before them.
+        syncBundledUpdater()
+
         // A dictation blocked by a denied Microphone permission asks us to open
         // Setup so the user can turn it on (AppState can't reach the windows).
         AppState.shared.onNeedsMicrophoneSetup = { [weak self] in self?.showOnboarding() }
@@ -119,6 +125,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         UserDefaults.standard.set(now, forKey: Self.tapRelaunchAtKey)
         EventLog.log("tap.autorelaunch", ["result": "relaunching"])
         relaunch()
+    }
+
+    /// Replaces ~/.localflow/auto-update.sh with the copy bundled in this release
+    /// when they differ. Only runs on machines that actually use the updater (the
+    /// LaunchAgent plist exists), so a dev build run from build/ changes nothing
+    /// on an un-installed machine. The bundled script is covered by the app's
+    /// code signature, and the app itself was signature-verified on download —
+    /// same trust chain as the app binary.
+    private func syncBundledUpdater() {
+        let fm = FileManager.default
+        let home = fm.homeDirectoryForCurrentUser
+        let agentPlist = home.appendingPathComponent("Library/LaunchAgents/com.nikosummers.localflow.updater.plist")
+        guard fm.fileExists(atPath: agentPlist.path),
+              let bundled = Bundle.main.url(forResource: "auto-update", withExtension: "sh"),
+              let newScript = try? Data(contentsOf: bundled) else { return }
+        let installed = home.appendingPathComponent(".localflow/auto-update.sh")
+        let current = try? Data(contentsOf: installed)
+        guard current != newScript else { return }
+        DispatchQueue.global(qos: .utility).async {
+            do {
+                try fm.createDirectory(at: installed.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try newScript.write(to: installed, options: .atomic)
+                try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: installed.path)
+                EventLog.log("updater.synced", ["bytes": String(newScript.count)])
+            } catch {
+                EventLog.log("updater.syncFailed", ["error": String(describing: error)])
+            }
+        }
     }
 
     /// Publishes the "wedged" state — Input Monitoring granted but no tap — so the

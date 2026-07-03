@@ -19,6 +19,12 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/LocalFlow"
 cp "$ROOT/Sources/LocalFlow/Info.plist" "$APP/Contents/Info.plist"
 cp "$ROOT/Sources/LocalFlow/Resources/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
+# Bundle the auto-updater script so each release CARRIES its own updater: the
+# app syncs it to ~/.localflow/auto-update.sh at launch. Without this, machines
+# keep whatever updater their install day shipped, forever — updater fixes
+# (atomic swap, signature verification) would never reach existing installs.
+# Inside the bundle it's covered by the app's code signature.
+cp "$ROOT/Scripts/auto-update.sh" "$APP/Contents/Resources/auto-update.sh"
 
 # SwiftPM emits resource bundles (e.g. WhisperKit's) next to the binary; Bundle.module
 # resolves them from Contents/Resources inside a .app, so copy any that exist.
