@@ -72,6 +72,7 @@ struct SettingsView: View {
     let onPartialsChanged: () -> Void
     let onCleanupChanged: () -> Void
     let onInstantCaptureChanged: () -> Void
+    let onDockVisibilityChanged: (Bool) -> Void
 
     @StateObject private var vm = DictionaryViewModel()
 
@@ -82,7 +83,8 @@ struct SettingsView: View {
                 onHotkeyChanged: onHotkeyChanged,
                 onPartialsChanged: onPartialsChanged,
                 onCleanupChanged: onCleanupChanged,
-                onInstantCaptureChanged: onInstantCaptureChanged
+                onInstantCaptureChanged: onInstantCaptureChanged,
+                onDockVisibilityChanged: onDockVisibilityChanged
             )
             .tabItem { Label("General", systemImage: "gearshape") }
 
@@ -104,11 +106,15 @@ private struct GeneralTab: View {
     let onPartialsChanged: () -> Void
     let onCleanupChanged: () -> Void
     let onInstantCaptureChanged: () -> Void
+    let onDockVisibilityChanged: (Bool) -> Void
 
     @AppStorage("modelName") private var modelName = defaultModelName
     @AppStorage("launchAtLogin") private var launchAtLogin = true
+    @AppStorage("showInDock") private var showInDock = true
     @AppStorage("restoreClipboard") private var restoreClipboard = true
     @AppStorage("instantCapture") private var instantCapture = true
+
+    @AppStorage("historyEnabled") private var historyEnabled = true
 
     @AppStorage("cleanupEnabled") private var cleanupEnabled = true
     @AppStorage("cleanupModel") private var cleanupModel = "gemma3:4b"
@@ -141,10 +147,22 @@ private struct GeneralTab: View {
                 Text("Starts LocalFlow automatically when you log in, so it's always ready in the menu bar.")
                     .font(.caption)
                     .foregroundColor(.secondary)
+
+                Toggle("Show LocalFlow in the Dock", isOn: $showInDock)
+                Text("Adds a Dock icon (on by default) — click it to open this window. LocalFlow always lives in the menu bar either way; turn this off for a menu-bar-only app.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
             }
 
             Section("Clipboard") {
                 Toggle("Restore clipboard after pasting", isOn: $restoreClipboard)
+            }
+
+            Section("History") {
+                Toggle("Save dictation history on this Mac", isOn: $historyEnabled)
+                Text("Keeps a searchable list of your past dictations (the most recent 200) in LocalFlow's Application Support folder. It never leaves this Mac. Open the main window to review, re-copy, or correct past dictations — and to Clear History. Turn this off to stop saving new dictations; anything already saved stays until you clear it.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
             }
 
             Section("Microphone") {
@@ -190,6 +208,7 @@ private struct GeneralTab: View {
                 launchAtLogin = !newValue
             }
         }
+        .onChange(of: showInDock) { _, newValue in onDockVisibilityChanged(newValue) }
         .onChange(of: showLivePreview) { _, _ in onPartialsChanged() }
         .onChange(of: partialsModel) { _, _ in onPartialsChanged() }
         .onChange(of: cleanupEnabled) { _, _ in onCleanupChanged() }

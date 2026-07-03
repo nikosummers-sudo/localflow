@@ -109,6 +109,10 @@ final class AppState: ObservableObject {
     /// the user can always re-copy it — the "Copy Last Transcript" safety net.
     @Published private(set) var lastTranscript: String = ""
 
+    /// Bumped whenever a dictation is appended to the history store, so an open
+    /// main window can refresh its list without polling.
+    @Published private(set) var historyRevision: Int = 0
+
     /// The most recent app (other than LocalFlow itself) to come to the
     /// foreground. Used by the Settings "Apps" tab to seed a rule for the app the
     /// user was just in, since opening Settings makes LocalFlow frontmost.
@@ -117,8 +121,14 @@ final class AppState: ObservableObject {
 
     /// The app that was frontmost when the CURRENT dictation started. Rules bind
     /// to where the user began dictating, so this is captured at start and used
-    /// for the whole dictation's cleanup/tone decisions.
+    /// for the whole dictation's cleanup/tone decisions. The name is also recorded
+    /// on the saved history entry.
     private var activeAppBundleID: String?
+    private var activeAppName: String?
+
+    /// Duration (seconds) of the most recent recording, stamped onto its history
+    /// record. Set in `stopDictation` before the transcription branches run.
+    private var lastRecordingDuration: Double = 0
 
     private let recorder = AudioRecorder()
     /// The single main engine, wrapped so a streaming chunk, the post-release
@@ -284,7 +294,9 @@ final class AppState: ObservableObject {
     /// app and never steals focus, so the frontmost app here is the one the user
     /// is dictating into — the correct binding for per-app rules.
     private func captureActiveApp() {
-        activeAppBundleID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+        let front = NSWorkspace.shared.frontmostApplication
+        activeAppBundleID = front?.bundleIdentifier
+        activeAppName = front?.localizedName
     }
 
     // MARK: - Per-app rules & cleanup context
@@ -342,6 +354,7 @@ final class AppState: ObservableObject {
 
         let finalSamples = recorder.endRecording()
         let duration = Double(finalSamples.count) / AudioRecorder.targetSampleRate
+        lastRecordingDuration = duration
 
         // Detach the streaming handles for this dictation.
         let source = liveSource
@@ -444,6 +457,9 @@ final class AppState: ObservableObject {
         // Retain the final text before insertion so it can always be re-copied,
         // even if the paste lands nowhere useful.
         lastTranscript = text
+        // Record it in history regardless of where the paste lands (pasted /
+        // leftOnClipboard / noInputField all produced this same final text).
+        appendHistory(text: text)
 
         setStatus(.pasting)
         let result = await inserter.insert(text, restoreClipboard: restoreClipboardEnabled())
@@ -481,6 +497,27 @@ final class AppState: ObservableObject {
             text = applyReplacements(text, replacements)
         }
         return text
+    }
+
+    /// Whether new dictations are saved to the on-disk history. Default on when
+    /// the key has never been set; mirrors the Settings toggle.
+    private func historyEnabled() -> Bool {
+        if UserDefaults.standard.object(forKey: "historyEnabled") == nil { return true }
+        return UserDefaults.standard.bool(forKey: "historyEnabled")
+    }
+
+    /// Appends the just-produced final text to the history store (newest first)
+    /// and signals any open main window to refresh. No-op when history is off.
+    private func appendHistory(text: String) {
+        guard historyEnabled() else { return }
+        let record = DictationRecord(
+            text: text,
+            appName: activeAppName,
+            bundleID: activeAppBundleID,
+            durationSeconds: lastRecordingDuration > 0 ? lastRecordingDuration : nil
+        )
+        HistoryStore.shared.append(record)
+        historyRevision &+= 1
     }
 
     /// Puts the most recent dictation back on the clipboard. Drives the menu-bar

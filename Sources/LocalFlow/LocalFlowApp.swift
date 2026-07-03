@@ -14,6 +14,12 @@ struct LocalFlowApp: App {
 
             Divider()
 
+            Button("Open LocalFlow") {
+                appDelegate.showMainWindow()
+            }
+
+            Divider()
+
             Button("Copy Last Transcript") {
                 appState.copyLastTranscript()
             }

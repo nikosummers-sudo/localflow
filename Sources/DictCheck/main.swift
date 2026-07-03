@@ -165,6 +165,129 @@ if CommandLine.arguments.contains("--hotkey") {
     exit(failures == 0 ? 0 : 1)
 }
 
+// MARK: - Dictation history + corrections (pure, scratch-dir store)
+
+if CommandLine.arguments.contains("--history") {
+    func scratchDir() -> URL {
+        FileManager.default.temporaryDirectory
+            .appendingPathComponent("localflow-historycheck-\(UUID().uuidString)", isDirectory: true)
+    }
+
+    // --- HistoryStore round-trip: ordering, cap eviction, update, delete, clear
+    let dir = scratchDir()
+    do {
+        let store = HistoryStore(directory: dir)
+        for i in 0..<205 { store.append(DictationRecord(text: "r\(i)")) }
+        let all = store.all()
+        check("append caps history at 200", all.count == HistoryStore.cap)
+        check("history is newest-first [\(all.first?.text ?? "nil")]", all.first?.text == "r204")
+        check("oldest beyond cap is evicted [\(all.last?.text ?? "nil")]", all.last?.text == "r5")
+
+        // Reload from disk into a fresh store and confirm it persisted.
+        let reloaded = HistoryStore(directory: dir)
+        check("history round-trips through disk", reloaded.all().count == HistoryStore.cap)
+        check("newest-first survives reload", reloaded.all().first?.text == "r204")
+
+        // updateText
+        let topID = reloaded.all().first!.id
+        reloaded.updateText(id: topID, newText: "r204-edited")
+        check("updateText rewrites the record",
+              HistoryStore(directory: dir).all().first(where: { $0.id == topID })?.text == "r204-edited")
+
+        // delete
+        reloaded.delete(id: topID)
+        check("delete removes the record", !reloaded.all().contains(where: { $0.id == topID }))
+        check("delete reduces the count on disk", HistoryStore(directory: dir).all().count == HistoryStore.cap - 1)
+
+        // clear
+        reloaded.clear()
+        check("clear empties in memory", reloaded.all().isEmpty)
+        check("clear empties on disk", HistoryStore(directory: dir).all().isEmpty)
+    }
+    try? FileManager.default.removeItem(at: dir)
+
+    // --- Tokenizer: split on whitespace, punctuation stays attached to the word
+    do {
+        let toks = DictationHistory.tokenize("please use oh llama.")
+        check("tokenizer splits on whitespace, punctuation attached [\(toks.map { $0.text }.joined(separator: "|"))]",
+              toks.map { $0.text } == ["please", "use", "oh", "llama."])
+    }
+
+    // --- Selected phrase is faithful to the range (verbatim, punctuation kept)
+    check("phrase preserves the selected range verbatim [\(DictationHistory.phrase(in: "please use oh llama.", selection: 2...3))]",
+          DictationHistory.phrase(in: "please use oh llama.", selection: 2...3) == "oh llama.")
+
+    // --- Record-text range replacement leaves surrounding text intact
+    check("applyingCorrection replaces only the selected range [\(DictationHistory.applyingCorrection(to: "please use oh llama for cleanup", selection: 2...3, corrected: "Ollama"))]",
+          DictationHistory.applyingCorrection(to: "please use oh llama for cleanup", selection: 2...3, corrected: "Ollama")
+              == "please use Ollama for cleanup")
+
+    // --- makeCorrectionRule: punctuation-stripped find, whole-word, case-insensitive
+    do {
+        let rule = DictationHistory.makeCorrectionRule(original: "llama.", corrected: "Ollama")
+        check("rule find strips trailing punctuation [\(rule.find)]", rule.find == "llama")
+        check("rule replace is trimmed [\(rule.replace)]", rule.replace == "Ollama")
+        check("rule is case-insensitive", rule.caseSensitive == false)
+        check("rule is whole-word", rule.wholeWord == true)
+    }
+
+    // --- Multi-word phrase rule keeps internal spacing and applies as a phrase
+    do {
+        let rule = DictationHistory.makeCorrectionRule(original: "Oh llama", corrected: "Ollama")
+        check("multi-word rule find keeps internal space [\(rule.find)]", rule.find == "Oh llama")
+        let applied = applyReplacements("i said oh llama again", [rule])
+        check("multi-word rule auto-corrects future text (case-insensitive) [\(applied)]",
+              applied == "i said Ollama again")
+    }
+
+    // --- Full correction loop, headlessly: fix a record AND teach the dictionary,
+    //     then prove a future dictation auto-corrects. Prints outputs verbatim.
+    let loopDir = scratchDir()
+    do {
+        let store = HistoryStore(directory: loopDir)
+        let config = LocalFlowConfig(directory: loopDir)
+
+        store.append(DictationRecord(text: "please use oh llama for cleanup"))
+        let record = store.all().first!
+
+        // User selects the "oh llama" chips (token indices 2...3) and types "Ollama".
+        let selection = 2...3
+        let original = DictationHistory.phrase(in: record.text, selection: selection)
+        let corrected = "Ollama"
+        let newText = DictationHistory.applyingCorrection(to: record.text, selection: selection, corrected: corrected)
+
+        // "Fix & auto-correct": update the record, add the rule, add the vocab term.
+        store.updateText(id: record.id, newText: newText)
+        var dictionary = config.dictionary
+        dictionary.replacements.append(DictationHistory.makeCorrectionRule(original: original, corrected: corrected))
+        dictionary.terms.append(corrected)
+        config.dictionary = dictionary
+
+        let updatedText = store.all().first!.text
+        let learnedRule = config.dictionary.replacements.contains {
+            $0.find.caseInsensitiveCompare("oh llama") == .orderedSame && $0.replace == "Ollama"
+        }
+        let learnedTerm = config.dictionary.terms.contains { $0.caseInsensitiveCompare("Ollama") == .orderedSame }
+        let futureDictation = applyReplacements("i said oh llama again", config.dictionary.replacements)
+
+        print("--- correction loop ---")
+        print("selected phrase:        \(original)")
+        print("record text after fix:  \(updatedText)")
+        print("dictionary has rule:    \(learnedRule)")
+        print("dictionary has term:    \(learnedTerm)")
+        print("future dictation:       \(futureDictation)")
+
+        check("record text is updated in place", updatedText == "please use Ollama for cleanup")
+        check("dictionary learned the replacement rule", learnedRule)
+        check("dictionary learned the vocabulary term", learnedTerm)
+        check("a future dictation auto-corrects", futureDictation == "i said Ollama again")
+    }
+    try? FileManager.default.removeItem(at: loopDir)
+
+    print(failures == 0 ? "HISTORY: OK" : "HISTORY: \(failures) FAILURE(S)")
+    exit(failures == 0 ? 0 : 1)
+}
+
 // Renders newlines visibly so failures are readable in the terminal.
 func show(_ s: String) -> String {
     s.replacingOccurrences(of: "\n", with: "\\n")

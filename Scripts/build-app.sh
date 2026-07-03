@@ -18,6 +18,7 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
 cp "$BIN" "$APP/Contents/MacOS/LocalFlow"
 cp "$ROOT/Sources/LocalFlow/Info.plist" "$APP/Contents/Info.plist"
+cp "$ROOT/Sources/LocalFlow/Resources/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
 
 # SwiftPM emits resource bundles (e.g. WhisperKit's) next to the binary; Bundle.module
 # resolves them from Contents/Resources inside a .app, so copy any that exist.

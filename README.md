@@ -4,7 +4,8 @@ A privacy-first, 100% local dictation app for macOS — a self-hosted take on Wi
 Hold a key, speak, release, and your words are transcribed **entirely on your Mac** and
 inserted wherever your cursor is. No cloud, no accounts, no telemetry.
 
-LocalFlow lives in the menu bar (no Dock icon) and uses
+LocalFlow lives in the menu bar and (by default) the Dock — the Dock icon is optional and
+can be turned off in [Settings](#settings) for a menu-bar-only app. It uses
 [WhisperKit](https://github.com/argmaxinc/WhisperKit) for on-device speech-to-text.
 
 ## Install
@@ -269,8 +270,35 @@ until you've dictated something.)
 > active tap, LocalFlow falls back to a listen-only tap: lock mode still engages, but the
 > Space can't be swallowed before it reaches the focused app.
 
-Double-clicking LocalFlow in Finder or Launchpad reopens the **Setup** window (handy since
-there's no Dock icon).
+Clicking the Dock icon (or double-clicking LocalFlow in Finder / Launchpad) opens the **main
+window** — the searchable list of your past dictations. A gear button there opens Settings,
+and **Setup & Permissions…** is always available from the menu bar.
+
+## Dictation history
+
+Every dictation is saved to a searchable list you can reopen any time — click the **Dock
+icon**, choose **Open LocalFlow** from the menu bar, or click the Dock icon again.
+
+- **What it stores.** Each entry keeps the final inserted text, when it was dictated, and the
+  app you dictated into. The most recent **200** dictations are kept; older ones drop off.
+- **Where it lives.** A single `history.json` under
+  `~/Library/Application Support/LocalFlow/`. It is stored **only on this Mac** and never
+  leaves it.
+- **Re-copy anything.** Hover a row and click **Copy** to put that whole dictation back on
+  the clipboard. Row text is also selectable, so you can highlight and copy just part of it.
+- **Fix a word — and teach LocalFlow.** Hover a row, click the **pencil (Fix words)**, and
+  each word becomes a clickable chip. Click a word (shift-click another to select a phrase
+  like "Oh llama"), type the correction ("Ollama"), and choose:
+  - **Fix & auto-correct** — rewrites this saved entry *and* teaches your
+    [personal dictionary](#settings) so future dictations of that word/phrase auto-correct.
+    The correction is added as a whole-word replacement and as a vocabulary term (so it also
+    biases transcription and survives AI cleanup).
+  - **Just fix here** — only rewrites this one saved entry, teaching nothing.
+- **Clear it.** The footer shows a running count and a **Clear History** button (with a
+  confirmation) that erases every saved dictation from this Mac.
+- **Turn it off.** Settings has a **Save dictation history on this Mac** toggle (on by
+  default). With it off, new dictations aren't saved; anything already saved stays until you
+  clear it.
 
 ## Settings
 
@@ -290,8 +318,15 @@ Menu bar → **Settings…**:
   Space key, and system-reserved combos like ⌘V / ⌘C / ⌘X / ⌘Q / ⌘W.
 - **Launch LocalFlow at login** — **on by default**. Starts LocalFlow automatically when you
   log in so it's always ready in the menu bar. Turn it off to launch it yourself.
+- **Show LocalFlow in the Dock** — **on by default**. Shows a Dock icon; clicking it opens
+  the main window. LocalFlow always stays in the menu bar regardless — turn this off for a
+  menu-bar-only app. Toggling it takes effect immediately, no restart needed.
 - **Restore clipboard after pasting** — on by default; restores your previous clipboard
   contents ~0.6s after inserting text.
+- **Save dictation history on this Mac** — **on by default**. Saves each dictation to the
+  searchable list in the main window (see [Dictation history](#dictation-history)). Stored
+  only on this Mac, capped at the most recent 200. Turn it off to stop saving new dictations;
+  use **Clear History** in the main window to erase what's saved.
 - **Microphone**
   - *Instant capture (keeps mic warm)* — **on by default**. Keeps the microphone open so
     dictation starts instantly and never clips your first words. Audio spoken outside a
@@ -327,6 +362,13 @@ Menu bar → **Settings…**:
   can't accept text, so it left the transcript on your clipboard instead of pasting into
   nowhere. Click into a real text field and paste (⌘V), or use **Copy Last Transcript** from
   the menu.
+- **Why is the orange microphone indicator always on?** That dot is macOS's privacy
+  indicator, shown whenever any app has the microphone open. LocalFlow keeps the mic open
+  for **instant capture** (dictation starts instantly, first words never clipped). While
+  idle, audio only flows into a 2-second rolling buffer in RAM that is continuously
+  overwritten — never transcribed, stored, or transmitted. Prefer the dot to appear only
+  while dictating? Turn off *Instant capture* in Settings (dictation then takes a beat to
+  start).
 
 ## Roadmap
 
@@ -335,14 +377,22 @@ Menu bar → **Settings…**:
   onboarding, settings. ✅ Done.
 - **Phase 2 — Cleanup & live feedback.** Optional local LLM (Ollama, `gemma3:4b`) to tidy
   transcripts; live partial-transcription HUD. ✅ Done.
-- **Phase 3 — Power features.** Custom dictionary and voice commands. ⏭ Next.
-- **Phase 4 — Polish.** UX, onboarding, and performance refinements.
+- **Phase 3 — Power features.** Custom dictionary, voice commands ("new line", "scratch
+  that"), per-app modes, configurable shortcuts. ✅ Done.
+- **Phase 4 — Polish.** Streaming transcription, instant capture, Dock/menu-bar presence,
+  auto-updates. ✅ Largely done — remaining ideas: raw-then-replace insertion, swappable
+  Parakeet STT engine.
 
 ## Privacy
 
 - **No telemetry.** LocalFlow collects nothing and phones home to nothing.
 - **Everything stays local.** Audio never leaves your Mac. Transcription runs on-device via
   WhisperKit / Core ML, and the optional AI cleanup runs on-device via Ollama.
+- **Dictation history is local and optional.** When enabled (the default), each dictation's
+  final text is saved to `history.json` under `~/Library/Application Support/LocalFlow/`,
+  capped at the most recent 200 entries. It is stored **only on this Mac**, never transmitted.
+  Turn off *Save dictation history* in [Settings](#settings) to stop saving, or use **Clear
+  History** in the main window to erase it.
 - **Instant capture is bounded and transient.** With instant capture on (the default), the
   microphone stays open while LocalFlow runs so dictation can start without clipping your
   first words. Audio spoken *outside* a dictation lives only in a rolling **2-second

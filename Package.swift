@@ -36,7 +36,10 @@ let package = Package(
                 "LocalFlowStreaming"
             ],
             path: "Sources/LocalFlow",
-            exclude: ["Info.plist"]
+            // Info.plist and the app icon are bundled by Scripts/build-app.sh, not SwiftPM,
+            // so exclude them from the target (declaring the .icns as a .copy resource would
+            // make SwiftPM emit a LocalFlow_LocalFlow.bundle we don't want).
+            exclude: ["Info.plist", "Resources"]
         ),
         .executableTarget(
             name: "SttSmokeCheck",

@@ -6,10 +6,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let hotkeyMonitor = HotkeyMonitor()
     private var onboardingWindow: NSWindow?
     private var settingsWindow: NSWindow?
+    private var mainWindow: NSWindow?
     private var hotkeyRetryTimer: Timer?
     private var hudController: HUDController?
 
+    /// Whether the app should show a Dock icon. Defaults to true when the key has
+    /// never been set. Info.plist ships LSUIElement=true so a fresh process starts as
+    /// an accessory (no Dock flash for users who turn this off); we promote to a
+    /// regular app here at launch when the setting is on.
+    static var showInDockSetting: Bool {
+        if UserDefaults.standard.object(forKey: "showInDock") == nil { return true }
+        return UserDefaults.standard.bool(forKey: "showInDock")
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
+        if Self.showInDockSetting {
+            NSApp.setActivationPolicy(.regular)
+        }
+
         hotkeyMonitor.onKeyDown = { AppState.shared.startDictation() }
         hotkeyMonitor.onKeyUp = { AppState.shared.stopDictation() }
         hotkeyMonitor.onLockEngaged = { AppState.shared.lockDictation() }
@@ -45,15 +59,48 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// LocalFlow is a menu-bar app with no dock window, so double-clicking it in
-    /// Finder/Launchpad otherwise appears to do nothing. Reopen the setup window
-    /// (which shows a success card once all permissions are granted).
+    /// Fired when the user clicks the Dock icon (when shown) or double-clicks the app
+    /// in Finder/Launchpad. Opens the main window — the app's home for reviewing,
+    /// re-copying, and correcting past dictations.
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
-        showOnboarding()
+        showMainWindow()
         return true
     }
 
+    /// Shows or hides the Dock icon live from the Settings toggle. Switching to
+    /// `.accessory` can drop key status and hide the app's windows, so re-activate and
+    /// re-front the Settings window afterwards so the toggle doesn't appear to close it.
+    func setDockVisible(_ visible: Bool) {
+        NSApp.setActivationPolicy(visible ? .regular : .accessory)
+        NSApp.activate(ignoringOtherApps: true)
+        settingsWindow?.makeKeyAndOrderFront(nil)
+    }
+
     // MARK: - Windows
+
+    /// The main interface: the dictation-history browser. A single resizable
+    /// window, lazily created and reused across reopens.
+    func showMainWindow() {
+        if mainWindow == nil {
+            let view = MainWindowView(
+                onOpenSettings: { [weak self] in self?.showSettings() },
+                onOpenSetup: { [weak self] in self?.showOnboarding() }
+            )
+            let window = NSWindow(
+                contentRect: NSRect(x: 0, y: 0, width: 760, height: 540),
+                styleMask: [.titled, .closable, .miniaturizable, .resizable],
+                backing: .buffered,
+                defer: false
+            )
+            window.title = "LocalFlow"
+            window.contentView = NSHostingView(rootView: view)
+            window.isReleasedWhenClosed = false
+            window.minSize = NSSize(width: 560, height: 400)
+            window.center()
+            mainWindow = window
+        }
+        present(mainWindow)
+    }
 
     func showOnboarding() {
         if onboardingWindow == nil {
@@ -88,7 +135,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 },
                 onPartialsChanged: { AppState.shared.reloadPartials() },
                 onCleanupChanged: { AppState.shared.warmCleanupModel() },
-                onInstantCaptureChanged: { AppState.shared.refreshContinuousCapture() }
+                onInstantCaptureChanged: { AppState.shared.refreshContinuousCapture() },
+                onDockVisibilityChanged: { [weak self] visible in self?.setDockVisible(visible) }
             )
             settingsWindow = makeWindow(title: "LocalFlow Settings", width: 520, height: 640, content: view)
         }
