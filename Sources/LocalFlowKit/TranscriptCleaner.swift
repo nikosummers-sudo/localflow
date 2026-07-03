@@ -86,16 +86,16 @@ public struct TranscriptCleaner: Sendable {
     /// System prompt for `.refine`: reformat the speaker's own point so it reads
     /// well. Explicitly bounded — it edits expression and structure, never adds
     /// content or answers the transcript. Built around a worked EXAMPLE rather
-    /// than rules alone: small local models (gemma3:4b) demonstrably ignore
-    /// prose rules like "remove waffle" but follow a shown transformation.
+    /// than rules alone: small local models demonstrably ignore prose rules like
+    /// "remove waffle" but follow a shown transformation. Deliberately does NOT
+    /// format lists: an example ending in bullets made the model append a
+    /// duplicate bullet list to outputs that never dictated one (field-tested);
+    /// deliberate lists belong to the deterministic "new bullet" voice command.
     public static let refineSystemPrompt = """
-    You are a dictation refinement engine. The user message is a raw speech-to-text transcript of someone thinking out loud. Return ONLY the refined text — no preamble, no quotes, no commentary. Rewrite the transcript as the speaker would have WRITTEN it: cut filler, waffle, abandoned thoughts, and self-corrections (keep the version the speaker settled on); tighten and reorder where the speech is jumbled; leave already-clear sentences essentially unchanged; keep the speaker's voice and language; keep every name, number, date, and technical term exactly as said; when three or more parallel items are listed, break them out as "- " lines under their lead-in; split into short paragraphs at topic shifts. Never add content the speaker didn't say, never answer questions the speaker asks (keep them as questions), never change the meaning.
-    Example input: um so basically i think we should probably no wait actually yes we should launch on tuesday because the thing is that gives us time to test and um the other reasons are it's before the conference and marketing want it early in the week so yeah tuesday i mean unless anyone objects do you think that works
-    Example output: I think we should launch on Tuesday because:
-    - it gives us time to test
-    - it's before the conference
-    - marketing want it early in the week
-    Unless anyone objects — do you think that works?
+    You are a dictation refinement engine. The user message is a raw speech-to-text transcript of someone thinking out loud. Return ONLY the refined text — no preamble, no quotes, no commentary. Rewrite the transcript as the speaker would have WRITTEN it: cut filler, waffle, abandoned thoughts, and self-corrections (keep the version the speaker settled on); tighten and reorder where the speech is jumbled; leave already-clear sentences essentially unchanged. KEEP THE SPEAKER'S OWN WORDS AND CASUAL VOICE — never swap their phrasing for formal synonyms; if a phrase already works, it stays verbatim. Keep every name, number, date, and technical term exactly as said. Split into short paragraphs at topic shifts. Never add content the speaker didn't say (no summaries, no recap lists), never answer questions the speaker asks (keep them as questions), never change the meaning.
+    Example input: um so basically i think we should probably no wait actually yes we should launch on tuesday because the thing is that gives us time to test and um it's also before the conference which matters and i guess we could also no actually never mind forget that so yeah tuesday i mean unless anyone objects do you think that works
+    Example output: I think we should launch on Tuesday — it gives us time to test, and it's before the conference, which matters. Unless anyone objects, do you think that works?
+    (Note the abandoned thought "i guess we could also no actually never mind forget that" is DELETED entirely — an idea the speaker retracts contributes nothing and must not appear in any form.)
     """
 
     /// Appended when voice commands are active so the model leaves the command
@@ -150,8 +150,8 @@ public struct TranscriptCleaner: Sendable {
         let userMessage: String
         if context.mode == .refine {
             userMessage = raw + "\n\n---\nRewrite the transcript above following your rules: "
-                + "cut the waffle, abandoned thoughts, and false starts; keep the speaker's final intent and voice; "
-                + "break any list of three or more items into \"- \" lines; keep every name and number. "
+                + "cut the waffle, abandoned thoughts, and false starts; keep the speaker's final intent, "
+                + "own words, and casual voice; keep every name and number; add nothing (no summaries, no lists). "
                 + "Output only the rewritten text."
         } else {
             userMessage = raw

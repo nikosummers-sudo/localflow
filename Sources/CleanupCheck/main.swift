@@ -154,8 +154,8 @@ print("RAW: \(raw)")
 // what the app actually sends.
 let debugUser = useRefine
     ? raw + "\n\n---\nRewrite the transcript above following your rules: "
-        + "cut the waffle, abandoned thoughts, and false starts; keep the speaker's final intent and voice; "
-        + "break any list of three or more items into \"- \" lines; keep every name and number. "
+        + "cut the waffle, abandoned thoughts, and false starts; keep the speaker's final intent, "
+        + "own words, and casual voice; keep every name and number; add nothing (no summaries, no lists). "
         + "Output only the rewritten text."
     : raw
 let preGuard = try? await OllamaClient().chat(
