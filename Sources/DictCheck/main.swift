@@ -698,7 +698,7 @@ do {
 
 // The encoded placeholders themselves are the exact agreed tokens.
 do {
-    let encoded = encodeCommands("a new line b new paragraph c scratch that d bullet point e")
+    let encoded = encodeCommands("a new line b new paragraph c scratch that d new bullet e")
     check("encode emits the exact placeholder tokens",
           encoded.contains(VoiceCommand.newLinePlaceholder)
               && encoded.contains(VoiceCommand.newParagraphPlaceholder)
@@ -706,12 +706,20 @@ do {
               && encoded.contains(VoiceCommand.bulletPlaceholder))
 }
 
-// "bullet point" produces a deterministic "- " line — no model judgment.
+// "new bullet" produces a deterministic "- " line — no model judgment.
 do {
     let out = normalizeAfterCommands(decodeCommands(encodeCommands(
-        "things to do bullet point update the website bullet point email customers bullet point post in slack")))
-    check("bullet point command renders '- ' lines [\(show(out))]",
+        "things to do new bullet update the website new bullet email customers new bullet post in slack")))
+    check("new bullet command renders '- ' lines [\(show(out))]",
           out == "things to do\n- update the website\n- email customers\n- post in slack")
+}
+
+// The phrase "bullet point" spoken as CONTENT must pass through untouched —
+// field-reported: it fired as a command mid-sentence and broke the dictation.
+do {
+    let content = "maybe make a bullet point list to see what it looks like"
+    check("spoken 'bullet point' as content is NOT a command [\(show(encodeCommands(content)))]",
+          encodeCommands(content) == content)
 }
 
 // MARK: - Newline-preserving normalization

@@ -25,9 +25,12 @@ public func encodeCommands(_ text: String) -> String {
     s = replacePhrase(s, phrase: "new paragraph", with: VoiceCommand.newParagraphPlaceholder)
     s = replacePhrase(s, phrase: "new line", with: VoiceCommand.newLinePlaceholder)
     s = replacePhrase(s, phrase: "scratch that", with: VoiceCommand.scratchPlaceholder)
-    // Deterministic list formatting: "bullet point" starts a "- " line, exactly,
-    // every time — no model judgment involved.
-    s = replacePhrase(s, phrase: "bullet point", with: VoiceCommand.bulletPlaceholder)
+    // Deterministic list formatting: "new bullet" starts a "- " line, exactly,
+    // every time — no model judgment involved. Deliberately NOT "bullet point":
+    // that phrase appears constantly in normal speech ("make a bullet point
+    // list") and fired as a command mid-sentence (field-reported). "New bullet"
+    // matches the "new line"/"new paragraph" family and never occurs as content.
+    s = replacePhrase(s, phrase: "new bullet", with: VoiceCommand.bulletPlaceholder)
     return s
 }
 
