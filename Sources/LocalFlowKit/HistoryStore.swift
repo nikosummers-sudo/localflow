@@ -11,6 +11,9 @@ public struct DictationRecord: Codable, Identifiable, Sendable, Equatable {
     public var appName: String?
     public var bundleID: String?
     public var durationSeconds: Double?
+    /// The pre-cleanup transcript, kept ONLY when AI cleanup changed the text —
+    /// so a bad cleanup is never the sole surviving copy of what was said.
+    public var raw: String?
 
     public init(
         id: UUID = UUID(),
@@ -18,7 +21,8 @@ public struct DictationRecord: Codable, Identifiable, Sendable, Equatable {
         text: String,
         appName: String? = nil,
         bundleID: String? = nil,
-        durationSeconds: Double? = nil
+        durationSeconds: Double? = nil,
+        raw: String? = nil
     ) {
         self.id = id
         self.date = date
@@ -26,10 +30,11 @@ public struct DictationRecord: Codable, Identifiable, Sendable, Equatable {
         self.appName = appName
         self.bundleID = bundleID
         self.durationSeconds = durationSeconds
+        self.raw = raw
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, date, text, appName, bundleID, durationSeconds
+        case id, date, text, appName, bundleID, durationSeconds, raw
     }
 
     // Tolerant decode: a missing/garbled field never fails the whole history load.
@@ -41,6 +46,7 @@ public struct DictationRecord: Codable, Identifiable, Sendable, Equatable {
         appName = try? c.decodeIfPresent(String.self, forKey: .appName)
         bundleID = try? c.decodeIfPresent(String.self, forKey: .bundleID)
         durationSeconds = try? c.decodeIfPresent(Double.self, forKey: .durationSeconds)
+        raw = try? c.decodeIfPresent(String.self, forKey: .raw)
     }
 }
 
@@ -58,6 +64,9 @@ public final class HistoryStore: @unchecked Sendable {
     private let lock = NSLock()
     private var _records: [DictationRecord]
     private let historyURL: URL
+    /// Serializes disk writes in mutation order, so an older snapshot can never
+    /// land on disk after a newer one (the writes themselves stay atomic).
+    private let saveQueue = DispatchQueue(label: "localflow.history.save", qos: .utility)
 
     /// `directory` is injectable so tests/CLIs can point at a scratch location.
     public init(directory: URL? = nil) {
@@ -77,7 +86,7 @@ public final class HistoryStore: @unchecked Sendable {
         let snapshot = _records
         let url = historyURL
         lock.unlock()
-        HistoryStore.save(snapshot, to: url)
+        saveQueue.async { HistoryStore.save(snapshot, to: url) }
     }
 
     /// All records, newest first.
@@ -96,7 +105,7 @@ public final class HistoryStore: @unchecked Sendable {
         let snapshot = _records
         let url = historyURL
         lock.unlock()
-        HistoryStore.save(snapshot, to: url)
+        saveQueue.async { HistoryStore.save(snapshot, to: url) }
     }
 
     public func delete(id: UUID) {
@@ -105,7 +114,7 @@ public final class HistoryStore: @unchecked Sendable {
         let snapshot = _records
         let url = historyURL
         lock.unlock()
-        HistoryStore.save(snapshot, to: url)
+        saveQueue.async { HistoryStore.save(snapshot, to: url) }
     }
 
     public func clear() {
@@ -113,7 +122,7 @@ public final class HistoryStore: @unchecked Sendable {
         _records = []
         let url = historyURL
         lock.unlock()
-        HistoryStore.save([DictationRecord](), to: url)
+        saveQueue.sync { HistoryStore.save([DictationRecord](), to: url) }
     }
 
     // MARK: - Disk (mirrors LocalFlowConfig's atomic best-effort persistence)

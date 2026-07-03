@@ -103,8 +103,17 @@ final class HUDController {
             scheduleHide(after: 4.0)
 
         case .loadingModel:
-            // Model loading isn't a dictation event — keep the HUD out of the way.
-            hideImmediately()
+            // Mid-pipeline (a dictation just ended and is waiting on the model):
+            // show a live "warming up" pill — a silently hidden HUD here reads as
+            // "the app ignored me" to a first-run user. A background preload
+            // (previous status idle/loading) stays out of the way as before.
+            switch previous {
+            case .recording, .recordingLocked, .transcribing, .cleaning:
+                vm.phase = .warmingUp
+                show()
+            default:
+                hideImmediately()
+            }
 
         case .error(let message):
             vm.phase = .error(message)
@@ -175,7 +184,10 @@ final class HUDController {
     }
 
     private func position(_ panel: HUDPanel) {
-        let screen = NSScreen.main?.frame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+        // NSScreen.main follows the focused app's screen; if the query fails, fall
+        // back to a REAL screen rather than a guessed rect that may be off-screen.
+        let screen = (NSScreen.main ?? NSScreen.screens.first)?.frame
+            ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
         let x = screen.midX - width / 2
         let y = screen.minY + bottomInset
         panel.setFrame(NSRect(x: x, y: y, width: width, height: height), display: true)

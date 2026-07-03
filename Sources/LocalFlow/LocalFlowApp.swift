@@ -5,6 +5,9 @@ struct LocalFlowApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @ObservedObject private var appState = AppState.shared
 
+    static let shortVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
+    static let buildNumber = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?"
+
     var body: some Scene {
         MenuBarExtra {
             if !appState.hotkeyActive {
@@ -20,6 +23,12 @@ struct LocalFlowApp: App {
                 .disabled(true)
             Text(appState.hotkeyBinding.menuHint)
                 .disabled(true)
+
+            if appState.canCancelDictation {
+                Button("Cancel Dictation (Esc)") {
+                    appState.cancelDictation()
+                }
+            }
 
             Divider()
 
@@ -41,6 +50,16 @@ struct LocalFlowApp: App {
             }
             Button("Settings…") {
                 appDelegate.showSettings()
+            }
+
+            Divider()
+
+            // Support affordances: an always-visible version (so "what version
+            // are you on?" is answerable) and a one-click diagnostics bundle.
+            Text("LocalFlow v\(Self.shortVersion) (build \(Self.buildNumber))")
+                .disabled(true)
+            Button("Save Diagnostics to Desktop") {
+                appState.saveDiagnostics()
             }
 
             Divider()

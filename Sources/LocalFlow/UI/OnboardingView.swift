@@ -19,10 +19,12 @@ struct OnboardingView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
             VStack(alignment: .leading, spacing: 4) {
-                Text(allGranted ? "You're all set" : "Welcome to LocalFlow")
+                Text(allGranted ? (hotkeyLive ? "You're all set" : "Almost there…") : "Welcome to LocalFlow")
                     .font(.title2).bold()
                 Text(allGranted
-                     ? "Here's how to dictate, correct a misheard word, and make LocalFlow yours."
+                     ? (hotkeyLive
+                        ? "Here's how to dictate, correct a misheard word, and make LocalFlow yours."
+                        : "Permissions granted — LocalFlow is activating your shortcut (it may relaunch once to finish; that's normal).")
                      : "Grant these three permissions to dictate anywhere on your Mac. Everything runs locally.")
                     .font(.subheadline)
                     .foregroundColor(.secondary)
@@ -42,6 +44,11 @@ struct OnboardingView: View {
         .onReceive(timer) { _ in refresh() }
         .onAppear { refresh() }
     }
+
+    /// True once the event tap is actually listening — macOS can report a grant
+    /// while the running process's tap is still dead (until the auto-relaunch
+    /// finishes), and "You're all set" must not appear before dictation works.
+    private var hotkeyLive: Bool { AppState.shared.hotkeyActive }
 
     // MARK: - Getting-started guide (shown once every permission is granted)
 

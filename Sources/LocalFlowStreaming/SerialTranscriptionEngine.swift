@@ -52,7 +52,14 @@ public actor SerialTranscriptionEngine {
     public nonisolated func transcribeOrTimeout(samples: [Float], seconds: Double) async -> String? {
         await withCheckedContinuation { (cont: CheckedContinuation<String?, Never>) in
             let once = OnceFlag()
-            Task {
+            // Hold the transcription task so the timeout branch can cancel it and
+            // drop the model. A parked CoreML/ANE call ignores cooperative
+            // cancellation, so cancel() alone can't reclaim the ~1.5 GB WhisperKit
+            // model — without discardModel() the parked task keeps this engine (and
+            // its model) alive even after the app loads a fresh engine, so repeated
+            // stalls stack until OOM. discardModel() drops our stored reference now,
+            // so the weights free once the stalled call finally unwinds.
+            let work = Task {
                 let text = try? await self.transcribe(samples: samples)
                 if once.claim() { cont.resume(returning: text) }
             }
@@ -60,10 +67,23 @@ public actor SerialTranscriptionEngine {
                 try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
                 if once.claim() {
                     EventLog.log("stt.watchdog", ["timeoutS": String(Int(seconds))])
+                    work.cancel()
+                    await self.discardModel()
                     cont.resume(returning: nil)
                 }
             }
         }
+    }
+
+    /// Drops the underlying engine's loaded model. The watchdog timeout path calls
+    /// this so a transcribe parked in a CoreML/ANE stall stops pinning ~1.5 GB;
+    /// callers replacing a poisoned engine may call it too. Deliberately does NOT
+    /// go through `run`: routing it through the serial chain would queue it behind
+    /// the very call that never returns. Safe because it only mutates the engine's
+    /// model reference, which the parked call no longer reads (it captured its own
+    /// local handle), and all other engine access is already actor-serialized.
+    public func discardModel() {
+        engine.discardModel()
     }
 
     /// Runs `operation` only after every previously-enqueued operation has fully

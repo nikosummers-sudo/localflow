@@ -255,6 +255,8 @@ private struct DictionaryTab: View {
                             Image(systemName: "minus.circle")
                         }
                         .buttonStyle(.borderless)
+                        .help("Remove this term")
+                        .accessibilityLabel("Remove \(vm.terms[index].isEmpty ? "term" : vm.terms[index])")
                     }
                 }
 
@@ -285,6 +287,8 @@ private struct DictionaryTab: View {
                                 Image(systemName: "minus.circle")
                             }
                             .buttonStyle(.borderless)
+                            .help("Remove this replacement")
+                            .accessibilityLabel("Remove replacement \(replacement.find.isEmpty ? "" : replacement.find)")
                         }
                         HStack {
                             Toggle("Whole word", isOn: $replacement.wholeWord)

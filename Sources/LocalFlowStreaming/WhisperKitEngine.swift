@@ -22,6 +22,31 @@ public final class WhisperKitEngine: TranscriptionEngine {
     /// crowd out the actual transcription context.
     private static let maxPromptTokens = 180
 
+    /// Minimum audio length (samples at Whisper's fixed 16 kHz) before the
+    /// empty-decode retry is worth running. 1.0s — see `transcribe`.
+    private static let minRetrySamples = 16_000
+
+    /// Empty marker file dropped inside a model folder once that model has fully
+    /// downloaded AND loaded at least once. See `markVerified` / `modelVerified`.
+    static let verifiedSentinelName = ".localflow-verified"
+
+    /// Whether `model` has previously completed a full download + load, i.e. its
+    /// verified sentinel exists. The app layer uses this instead of a bare folder
+    /// existence check: WhisperKit downloads ~1.6 GB on first run and, if the app
+    /// dies mid-download, the model FOLDER exists but is incomplete — a plain
+    /// folder check then grants only the short "cached" load budget forever, a
+    /// permanent timeout loop. Mirrors WhisperKit's on-disk layout (same
+    /// convention AppState.modelLikelyCached uses): ~/Documents/huggingface/
+    /// models/argmaxinc/whisperkit-coreml/openai_whisper-<model>/.localflow-verified.
+    public static func modelVerified(_ model: String) -> Bool {
+        let folder = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(
+                "Documents/huggingface/models/argmaxinc/whisperkit-coreml/openai_whisper-\(model)"
+            )
+        let sentinel = folder.appendingPathComponent(verifiedSentinelName)
+        return FileManager.default.fileExists(atPath: sentinel.path)
+    }
+
     /// Encoded vocabulary prompt, cached so we only re-tokenize when the terms
     /// actually change (the prompt is rebuilt on every transcribe call).
     private var cachedVocabSignature = ""
@@ -57,6 +82,34 @@ public final class WhisperKitEngine: TranscriptionEngine {
             statusNote = "Could not load \"\(requestedModel)\"; using \"\(fallbackModel)\" instead."
         }
         await warmUp()
+        // Download + load + a real inference all succeeded: mark the model folder
+        // verified so a future launch can trust the short "cached" load budget.
+        markVerified()
+    }
+
+    /// Drops an empty sentinel inside the loaded model's folder to record that the
+    /// model completed a full download + load. Written only here, after warm-up,
+    /// so a folder left behind by a half-finished download never carries it. Best
+    /// effort: if the write fails the only cost is a longer load budget next
+    /// launch. Uses WhisperKit's own `modelFolder` (the exact folder it loaded
+    /// from) so the path always exists; for the argmaxinc models this resolves to
+    /// the same openai_whisper-<model> folder `modelVerified` checks.
+    private func markVerified() {
+        guard let folder = whisperKit?.modelFolder else { return }
+        let sentinel = folder.appendingPathComponent(WhisperKitEngine.verifiedSentinelName)
+        try? Data().write(to: sentinel)
+    }
+
+    /// Drops the loaded model so ARC can free its ~1.5 GB of weights. Called when
+    /// a transcribe call has stalled at the CoreML/ANE layer and the engine is
+    /// being abandoned: nil-ing the stored reference here means that once the
+    /// parked call finally unwinds, the model is released instead of a dead engine
+    /// pinning it for the process lifetime (repeated stalls otherwise stack toward
+    /// OOM). A later transcribe on this instance transparently reloads via the
+    /// preload guard.
+    public func discardModel() {
+        whisperKit = nil
+        loadedModel = nil
     }
 
     /// Runs a throwaway transcription of one second of silence so CoreML/ANE
@@ -88,8 +141,10 @@ public final class WhisperKitEngine: TranscriptionEngine {
         // on SHORT clips, yielding an empty transcription (field-observed: short
         // dictations "vanished" once the personal dictionary had its first term).
         // Decode once more without the prompt — dictionary bias is a nice-to-have;
-        // the user's words are not.
-        if text.isEmpty, prompt != nil {
+        // the user's words are not. Gated on >= 1.0s of audio: a genuinely empty
+        // sub-second clip is almost always silence, and re-running a full pass on
+        // every one of them just doubles latency for no gain.
+        if text.isEmpty, prompt != nil, samples.count >= WhisperKitEngine.minRetrySamples {
             EventLog.log("stt.emptyWithPrompt", [
                 "samples": String(samples.count), "action": "retryNoPrompt",
             ])
@@ -105,12 +160,19 @@ public final class WhisperKitEngine: TranscriptionEngine {
     ///  - `withoutTimestamps` skips generating timestamp tokens we never use.
     ///  - `chunkingStrategy: .vad` splits long audio at silence and decodes the
     ///    chunks concurrently — a large win on long, hands-free dictations.
+    ///  - `noSpeechThreshold`/`compressionRatioThreshold` are hallucination
+    ///    guards: reject a decoded segment whose no-speech probability is high or
+    ///    whose text is pathologically repetitive, so a silent or near-silent
+    ///    clip can't emit invented words. Set explicitly to pin the intent; these
+    ///    values match WhisperKit 0.18's own defaults.
     private func decodingOptions(promptTokens: [Int]?) -> DecodingOptions {
         DecodingOptions(
             task: .transcribe,
             skipSpecialTokens: true,
             withoutTimestamps: true,
             promptTokens: promptTokens,
+            compressionRatioThreshold: 2.4,
+            noSpeechThreshold: 0.6,
             chunkingStrategy: .vad
         )
     }

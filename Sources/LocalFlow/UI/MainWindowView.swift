@@ -378,11 +378,17 @@ private struct HistoryRowView: View {
         .font(.callout)
     }
 
+    /// One shared formatter — allocating one per row per render is measurable
+    /// jank on a long history list.
+    private static let relativeFormatter: RelativeDateTimeFormatter = {
+        let f = RelativeDateTimeFormatter()
+        f.unitsStyle = .abbreviated
+        return f
+    }()
+
     private var metadataText: String {
-        let relative = RelativeDateTimeFormatter()
-        relative.unitsStyle = .abbreviated
         var parts = [
-            relative.localizedString(for: record.date, relativeTo: Date()),
+            Self.relativeFormatter.localizedString(for: record.date, relativeTo: Date()),
             record.date.formatted(date: .omitted, time: .shortened)
         ]
         if let app = record.appName, !app.isEmpty { parts.append(app) }
@@ -424,6 +430,12 @@ private struct HistoryRowView: View {
             )
             .contentShape(Rectangle())
             .onTapGesture { handleTap(index) }
+            // The tap gesture is invisible to VoiceOver/keyboard — expose each
+            // chip as a proper button so the correction loop is reachable.
+            .accessibilityElement()
+            .accessibilityLabel(tokens[index].text)
+            .accessibilityAddTraits(selected ? [.isButton, .isSelected] : .isButton)
+            .accessibilityAction { handleTap(index) }
     }
 
     private func handleTap(_ index: Int) {

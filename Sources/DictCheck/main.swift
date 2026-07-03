@@ -478,6 +478,69 @@ if CommandLine.arguments.contains("--log") {
     exit(failures == 0 ? 0 : 1)
 }
 
+// MARK: - Transcript cleanup post-guards (pure, no Ollama)
+
+// applyGuards decides whether the model's output replaces the raw transcript. The
+// guards below reject same-length refusals, heavy rewrites, and dropped command
+// tokens — cases the old length-ratio check let through. All pure, no network.
+if CommandLine.arguments.contains("--cleaner") {
+    typealias TC = TranscriptCleaner
+    let NL = VoiceCommand.newLinePlaceholder
+
+    // 1) A same-length refusal must fall back to raw. Length ratio here is ~0.9,
+    //    so it's the refusal guard — not the length guard — that catches it.
+    do {
+        let raw = "please buy some milk and also grab a dozen eggs today."
+        let refusal = "I'm sorry, but I can't assist with that request."
+        check("refusal opener is detected", TC.isRefusal(refusal))
+        check("same-length refusal falls back to raw",
+              TC.applyGuards(cleaned: refusal, raw: raw).text == raw)
+    }
+
+    // 2) A light rephrase (high word-set overlap) is accepted as the cleaned text.
+    do {
+        let raw = "um so i think we should probably ship the thing on friday you know"
+        let cleaned = "So I think we should probably ship the thing on Friday."
+        check("light rephrase has high overlap [\(TC.wordSetJaccard(raw, cleaned))]",
+              TC.wordSetJaccard(raw, cleaned) >= 0.35)
+        check("light rephrase is accepted (returns cleaned)",
+              TC.applyGuards(cleaned: cleaned, raw: raw).text == cleaned)
+    }
+
+    // 3) A heavy rewrite (≥8 distinct raw words, near-zero overlap) falls back to raw.
+    do {
+        let raw = "the quarterly sales figures exceeded our internal projections by a wide margin"
+        let rewrite = "please remember to water the office plants every single morning without fail"
+        check("heavy rewrite has low overlap [\(TC.wordSetJaccard(raw, rewrite))]",
+              TC.wordSetJaccard(raw, rewrite) < 0.35)
+        check("heavy rewrite falls back to raw",
+              TC.applyGuards(cleaned: rewrite, raw: raw).text == raw)
+    }
+
+    // 4) A dropped command placeholder falls back to raw even when words overlap.
+    do {
+        let raw = "buy milk \(NL) buy eggs \(NL) buy bread and some butter too please"
+        let cleaned = "Buy milk \(NL) buy eggs buy bread and some butter too please."
+        check("placeholder count mismatch is detected",
+              !TC.placeholdersSurvived(raw: raw, output: cleaned))
+        check("dropped placeholder falls back to raw",
+              TC.applyGuards(cleaned: cleaned, raw: raw).text == raw)
+    }
+
+    // 5) Equal placeholder counts + light cleanup pass through as the cleaned text.
+    do {
+        let raw = "buy milk \(NL) buy eggs and some bread and butter too please"
+        let cleaned = "Buy milk \(NL) buy eggs and some bread and butter too please."
+        check("placeholder counts equal survives the guard",
+              TC.placeholdersSurvived(raw: raw, output: cleaned))
+        check("equal placeholders + light cleanup returns cleaned",
+              TC.applyGuards(cleaned: cleaned, raw: raw).text == cleaned)
+    }
+
+    print(failures == 0 ? "CLEANER: OK" : "CLEANER: \(failures) FAILURE(S)")
+    exit(failures == 0 ? 0 : 1)
+}
+
 // Renders newlines visibly so failures are readable in the terminal.
 func show(_ s: String) -> String {
     s.replacingOccurrences(of: "\n", with: "\\n")

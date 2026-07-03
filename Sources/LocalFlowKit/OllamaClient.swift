@@ -58,7 +58,8 @@ public struct OllamaClient: Sendable {
     }
 
     /// Sends a single system+user turn to /api/chat (non-streaming) and returns
-    /// the assistant message content. Hard 15s request timeout.
+    /// the assistant message content. Hard 8s request timeout — the model is kept
+    /// warm, so a warm pass is well under this, and raw text is a safe fallback.
     public func chat(model: String, system: String, user: String) async throws -> String {
         guard let url = URL(string: baseURL + "/api/chat") else {
             throw OllamaError.invalidURL
@@ -78,7 +79,7 @@ public struct OllamaClient: Sendable {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONEncoder().encode(body)
-        request.timeoutInterval = 15
+        request.timeoutInterval = 8
 
         let (data, response) = try await URLSession.shared.data(for: request)
         if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {

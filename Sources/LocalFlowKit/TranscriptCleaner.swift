@@ -31,8 +31,10 @@ public struct TranscriptCleaner: Sendable {
 
     /// Default wall-clock budget for a cleanup pass. On expiry we fall back to
     /// raw. Callers on a latency-critical path (e.g. the streamed tail) can pass
-    /// a much tighter budget to `clean(_:budgetSeconds:)`.
-    public static let defaultTimeBudgetSeconds: Double = 15
+    /// a much tighter budget to `clean(_:budgetSeconds:)`. The cleanup model is
+    /// kept warm (keep_alive), so a warm pass finishes well inside this; the
+    /// budget mainly bounds the worst case, and raw is always a safe fallback.
+    public static let defaultTimeBudgetSeconds: Double = 6
 
     private let client: OllamaClient
 
@@ -121,18 +123,99 @@ public struct TranscriptCleaner: Sendable {
     // MARK: - Post-guards (pure, unit-testable without a network)
 
     /// Validates the model output against the raw transcript. Trims, strips a
-    /// fully-wrapping quote/code-fence, and rejects output that is empty or whose
-    /// length diverges too far from the raw text (a sign the model rewrote or
-    /// answered instead of cleaning).
+    /// fully-wrapping quote/code-fence, and rejects output that is empty, is a
+    /// refusal, whose length diverges too far, that dropped a protected command
+    /// token, or whose word content barely overlaps the raw text (all signs the
+    /// model rewrote or answered instead of cleaning). Any rejection falls back
+    /// to the raw transcript with an explanatory note.
     public static func applyGuards(cleaned: String, raw: String) -> (text: String, note: String?) {
         let output = stripWrapping(cleaned.trimmingCharacters(in: .whitespacesAndNewlines))
         if output.isEmpty { return (raw, nil) }
+
+        // A canned refusal/apology means the model answered instead of cleaning —
+        // and can slip past the length guard by being roughly transcript-length.
+        if isRefusal(output) {
+            return (raw, "Cleanup refused — inserted raw transcript")
+        }
 
         let ratio = Double(output.count) / Double(max(raw.count, 1))
         if ratio < 0.5 || ratio > 1.6 {
             return (raw, "Cleanup diverged — inserted raw transcript")
         }
+
+        // Protected voice-command tokens must survive byte-for-byte: each must
+        // appear the same number of times in the output as in the raw text.
+        if !placeholdersSurvived(raw: raw, output: output) {
+            return (raw, "Cleanup dropped a command token — inserted raw transcript")
+        }
+
+        // Cleanup should rephrase lightly, not rewrite: if the distinct-word sets
+        // barely overlap the model changed the content. Only meaningful once the
+        // raw text has enough words for the ratio to be stable.
+        if Set(contentWords(raw)).count >= 8, wordSetJaccard(raw, output) < 0.35 {
+            return (raw, "Cleanup diverged — inserted raw transcript")
+        }
+
         return (output, nil)
+    }
+
+    /// Opening phrases of a canned model refusal or apology (lowercased). When the
+    /// cleaned output begins with one of these, the model answered the transcript
+    /// instead of cleaning it.
+    static let refusalPrefixes = [
+        "i'm sorry", "i am sorry", "i can't", "i cannot",
+        "i'm not able", "i am not able", "as an ai",
+        "sorry, i", "i apologize", "i apologise"
+    ]
+
+    /// True when `output` opens with a refusal/apology. Trimmed and lowercased
+    /// before matching so leading whitespace and case never hide it.
+    public static func isRefusal(_ output: String) -> Bool {
+        let lowered = output.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return refusalPrefixes.contains { lowered.hasPrefix($0) }
+    }
+
+    /// The voice-command placeholder tokens the cleanup model is told to copy
+    /// verbatim. Kept in sync with `VoiceCommand`.
+    static let placeholderTokens = [
+        VoiceCommand.newLinePlaceholder,
+        VoiceCommand.newParagraphPlaceholder,
+        VoiceCommand.scratchPlaceholder
+    ]
+
+    /// True when every placeholder token appears the same number of times in
+    /// `output` as in `raw`. A mismatch means the model dropped, added, or mangled
+    /// a protected token. Tokens absent from both sides pass trivially, so this is
+    /// a no-op when no voice commands are in play.
+    public static func placeholdersSurvived(raw: String, output: String) -> Bool {
+        for token in placeholderTokens
+        where occurrences(of: token, in: raw) != occurrences(of: token, in: output) {
+            return false
+        }
+        return true
+    }
+
+    private static func occurrences(of token: String, in text: String) -> Int {
+        guard !token.isEmpty else { return 0 }
+        return text.components(separatedBy: token).count - 1
+    }
+
+    /// Lowercased alphanumeric word tokens, used for the content-overlap guard.
+    public static func contentWords(_ text: String) -> [String] {
+        text.lowercased()
+            .components(separatedBy: CharacterSet.alphanumerics.inverted)
+            .filter { !$0.isEmpty }
+    }
+
+    /// Jaccard similarity of the DISTINCT-word sets of `raw` and `output`
+    /// (intersection over union). 1 when both are empty. Callers gate on the raw
+    /// word count before trusting a low value.
+    public static func wordSetJaccard(_ raw: String, _ output: String) -> Double {
+        let rawSet = Set(contentWords(raw))
+        let outSet = Set(contentWords(output))
+        let union = rawSet.union(outSet).count
+        guard union > 0 else { return 1 }
+        return Double(rawSet.intersection(outSet).count) / Double(union)
     }
 
     /// Strips a single layer of wrapping only if the WHOLE output is wrapped —

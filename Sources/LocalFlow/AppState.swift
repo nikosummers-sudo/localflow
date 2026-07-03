@@ -239,7 +239,21 @@ final class AppState: ObservableObject {
         recorder.onLevel = { [weak self] level in
             Task { @MainActor in self?.updateAudioLevel(level) }
         }
+        // Selected mic vanished (USB unplugged, Bluetooth dropped): capture falls
+        // back to the system default — tell the user instead of silently recording
+        // through a different microphone.
+        recorder.onInputDeviceFallback = { [weak self] name in
+            Task { @MainActor in
+                self?.setBackgroundActivity(.note("Selected mic unavailable — using \(name)"))
+            }
+        }
         observeForegroundApp()
+    }
+
+    /// Surfaces a transient menu-bar note (auto-clears after 5s). For app-level
+    /// events like "Updated to v0.4".
+    func showNote(_ text: String) {
+        setBackgroundActivity(.note(text))
     }
 
     /// Tracks the last non-LocalFlow app to activate, so the Settings "Apps" tab
@@ -261,6 +275,26 @@ final class AppState: ObservableObject {
                 self?.lastForegroundName = name
             }
         }
+
+        // Sleep/wake: AVAudioEngine routinely stops across a lid-close and the
+        // config-change notification is NOT guaranteed to fire on wake — without
+        // this, every post-wake dictation captures silence until relaunch.
+        _ = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.handleWake() }
+        }
+    }
+
+    /// Rebuilds audio capture after the machine wakes from sleep. Never disturbs
+    /// a live dictation (vanishingly unlikely straight after wake anyway).
+    private func handleWake() {
+        EventLog.log("system.wake")
+        guard !status.isRecording else { return }
+        recorder.handleWake()
+        refreshContinuousCapture()
     }
 
     // MARK: - Model lifecycle
@@ -274,8 +308,11 @@ final class AppState: ObservableObject {
             try await engine.preload()
             engineHasLoadedOnce = true
             if let note = await engine.statusNote {
-                setStatus(.error(note))
-            } else if case .loadingModel = status {
+                // A fallback to a smaller model is a WORKING state — surface it as
+                // an informational note, not a red error.
+                setBackgroundActivity(.note(note))
+            }
+            if case .loadingModel = status {
                 setStatus(.idle)
             }
         } catch {
@@ -309,7 +346,12 @@ final class AppState: ObservableObject {
     private func modelLikelyCached() -> Bool {
         let folder = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Documents/huggingface/models/argmaxinc/whisperkit-coreml/openai_whisper-\(configuredModelName())")
-        return FileManager.default.fileExists(atPath: folder.path)
+        guard FileManager.default.fileExists(atPath: folder.path) else { return false }
+        // A folder left by an INTERRUPTED first download is not a cached model —
+        // it must get the full download budget so the resume can finish, or the
+        // short budget would timeout-loop forever. The engine drops a sentinel
+        // into the folder only after a fully successful load.
+        return WhisperKitEngine.modelVerified(configuredModelName())
     }
 
     /// Shows the honest loading status until the main engine is ready, then flips
@@ -511,7 +553,9 @@ final class AppState: ObservableObject {
             } catch {
                 // A cancellation means a newer heal took over — say nothing.
                 if Task.isCancelled { return }
-                self?.setBackgroundActivity(.note("AI cleanup unavailable — dictation still works"))
+                // Name the model: a typo in the Settings field should be
+                // self-diagnosing, not a silent fallback to raw text forever.
+                self?.setBackgroundActivity(.note("Cleanup model “\(model)” not found — inserting raw text"))
             }
         }
     }
@@ -541,7 +585,23 @@ final class AppState: ObservableObject {
 
     // MARK: - Dictation pipeline
 
+    /// True while a released dictation is still being processed (transcribe →
+    /// clean → paste). Guards startDictation against re-entering the pipeline —
+    /// notably during a first-run model download, where dictation #1 parks in
+    /// .loadingModel (which the status guard below deliberately allows, so users
+    /// CAN dictate while the launch preload runs) and #2 would otherwise overwrite
+    /// its streaming handles and interleave two pipelines.
+    private var pipelineActive = false
+    /// Set by cancelDictation() and the stuck-state watchdog; in-flight pipeline
+    /// stages check it and unwind without inserting.
+    private var pipelineCancelled = false
+    /// Recovery net of last resort for processing states (see setStatus).
+    private var processingWatchdogTask: Task<Void, Never>?
+
     func startDictation() {
+        // A pipeline that's been cancelled/watchdogged is already abandoned — it
+        // unwinds inertly, so a fresh dictation may start over it.
+        guard !pipelineActive || pipelineCancelled else { return }
         switch status {
         case .recording, .recordingLocked, .transcribing, .cleaning, .pasting:
             return
@@ -578,6 +638,7 @@ final class AppState: ObservableObject {
             try recorder.beginRecording()
             captureActiveApp()
             partialText = ""
+            pipelineCancelled = false
             setStatus(.recording)
             startAutoStop()
             startNoAudioHint()
@@ -596,7 +657,40 @@ final class AppState: ObservableObject {
         } catch {
             EventLog.log("dictation.start", ["result": "error", "error": String(describing: error)])
             setStatus(.error(error.localizedDescription))
+            // The hotkey layer advanced to "recording" on key-down; tell it the
+            // start didn't take so a Space/lock gesture can't latch a dead recording.
+            onDictationFailedToStart?()
         }
+    }
+
+    /// Fired when a hotkey-triggered start is refused (permissions, audio error),
+    /// so the hotkey state machine can reset instead of believing it's recording.
+    var onDictationFailedToStart: (() -> Void)?
+
+    /// Abandons the current dictation wherever it is: a live recording is
+    /// discarded, in-flight processing unwinds without inserting. Driven by Esc
+    /// (while recording), the menu-bar Cancel item, and the stuck-state watchdog.
+    func cancelDictation() {
+        guard status != .idle else { return }
+        EventLog.log("dictation.cancel", ["from": status.isRecording ? "recording" : "processing"])
+        pipelineCancelled = true
+        autoStopTask?.cancel()
+        autoStopTask = nil
+        if status.isRecording {
+            _ = recorder.endRecording()
+            if pendingMicRestart {
+                pendingMicRestart = false
+                restartCaptureAfterGrant()
+            }
+        }
+        supervisorTask?.cancel()
+        liveSource = nil
+        incremental = nil
+        supervisorTask = nil
+        let p = partials
+        Task { await p?.stop() }
+        partialText = ""
+        setStatus(.idle)
     }
 
     /// Records which app is frontmost as dictation begins. LocalFlow is a menu-bar
@@ -722,6 +816,9 @@ final class AppState: ObservableObject {
         // and a bare "Transcribing…" would read as a multi-minute hang.
         setStatus(engineHasLoadedOnce ? .transcribing : .loadingModel("Downloading speech model… (first run)"))
         Task {
+            pipelineActive = true
+            defer { pipelineActive = false }
+
             // Finish any in-flight partial before the authoritative final pass so
             // the two never run concurrently.
             await partials?.stop()
@@ -732,6 +829,7 @@ final class AppState: ObservableObject {
             supervisor?.cancel()
             _ = await supervisor?.value
             EventLog.log("pipeline.stage", ["at": "supervisorDone"])
+            guard !pipelineCancelled else { partialText = ""; return }
 
             // Never show "Transcribing…" while the model is still loading: surface
             // the loading status and wait (bounded) for the engine to be ready.
@@ -778,6 +876,11 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// True when the pipeline is mid-processing (used by the menu to offer Cancel).
+    var canCancelDictation: Bool {
+        status.isRecording || pipelineActive
+    }
+
     /// The existing single-pass path: one STT over the whole recording, one
     /// cleanup, then insertion. Used for short dictations and when streaming
     /// wasn't active.
@@ -810,7 +913,12 @@ final class AppState: ObservableObject {
         guard let sttText = sttResult else {
             EventLog.log("stt.failed", ["path": "single-pass", "error": "stalled twice"])
             partialText = ""
-            setStatus(.error("Transcription stalled — please dictate that again"))
+            if !pipelineCancelled { setStatus(.error("Transcription stalled — please dictate that again")) }
+            return
+        }
+        // Cancelled while STT ran (user cancel or watchdog): unwind without inserting.
+        guard !pipelineCancelled else {
+            partialText = ""
             return
         }
         guard !sttText.isEmpty else {
@@ -836,12 +944,22 @@ final class AppState: ObservableObject {
             EventLog.log("cleanup", ["path": "single-pass", "result": note == nil ? "ok" : "fallback"])
         }
 
-        await finishInsertion(text: finalText, note: note)
+        // Keep the pre-cleanup transcript when cleanup changed it: a bad cleanup
+        // must never be the ONLY surviving copy of what the user said.
+        await finishInsertion(text: finalText, note: note, raw: finalText != raw ? raw : nil)
     }
 
     /// Retains the final text, inserts it at the cursor, and drives the closing
-    /// status. Shared by the single-pass and streaming paths.
-    private func finishInsertion(text rawFinal: String, note: String?) async {
+    /// status. Shared by the single-pass and streaming paths. `raw` is the
+    /// pre-cleanup transcript when cleanup produced something different — stored
+    /// in history so the user's words are always recoverable.
+    private func finishInsertion(text rawFinal: String, note: String?, raw: String? = nil) async {
+        // A cancelled pipeline (user cancel or watchdog recovery) inserts nothing;
+        // the canceller already set the closing status.
+        guard !pipelineCancelled else {
+            partialText = ""
+            return
+        }
         // Single choke point for BOTH pipelines: resolve voice commands, then
         // apply the personal-dictionary hard replacements, then insert.
         let text = postProcess(rawFinal)
@@ -865,7 +983,7 @@ final class AppState: ObservableObject {
         lastTranscript = text
         // Record it in history regardless of where the paste lands (pasted /
         // leftOnClipboard / noInputField all produced this same final text).
-        appendHistory(text: text)
+        appendHistory(text: text, raw: raw)
 
         setStatus(.pasting)
         // Per-app insertion override: apps whose inputs hide from accessibility
@@ -930,13 +1048,14 @@ final class AppState: ObservableObject {
 
     /// Appends the just-produced final text to the history store (newest first)
     /// and signals any open main window to refresh. No-op when history is off.
-    private func appendHistory(text: String) {
+    private func appendHistory(text: String, raw: String? = nil) {
         guard historyEnabled() else { return }
         let record = DictationRecord(
             text: text,
             appName: activeAppName,
             bundleID: activeAppBundleID,
-            durationSeconds: lastRecordingDuration > 0 ? lastRecordingDuration : nil
+            durationSeconds: lastRecordingDuration > 0 ? lastRecordingDuration : nil,
+            raw: raw
         )
         HistoryStore.shared.append(record)
         historyRevision &+= 1
@@ -949,6 +1068,54 @@ final class AppState: ObservableObject {
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
         pasteboard.setString(lastTranscript, forType: .string)
+    }
+
+    /// One-click support bundle: zips the app + updater logs and version/OS info
+    /// to the Desktop and reveals it in Finder. Contains NO transcript content —
+    /// both logs are metadata-only by contract, and history.json is deliberately
+    /// excluded.
+    func saveDiagnostics() {
+        let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?"
+        let short = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
+        Task.detached(priority: .utility) {
+            let fm = FileManager.default
+            let staging = fm.temporaryDirectory.appendingPathComponent("LocalFlow-diagnostics-\(UUID().uuidString)")
+            let out = fm.homeDirectoryForCurrentUser.appendingPathComponent("Desktop/LocalFlow-diagnostics.zip")
+            do {
+                try fm.createDirectory(at: staging, withIntermediateDirectories: true)
+                let home = fm.homeDirectoryForCurrentUser
+                let sources = [
+                    home.appendingPathComponent("Library/Logs/LocalFlow.log"),
+                    home.appendingPathComponent(".localflow/update.log"),
+                ]
+                for src in sources where fm.fileExists(atPath: src.path) {
+                    try? fm.copyItem(at: src, to: staging.appendingPathComponent(src.lastPathComponent))
+                }
+                let info = """
+                LocalFlow \(short) (build \(build))
+                macOS \(ProcessInfo.processInfo.operatingSystemVersionString)
+                generated \(Date())
+                """
+                try info.write(to: staging.appendingPathComponent("versions.txt"), atomically: true, encoding: .utf8)
+
+                try? fm.removeItem(at: out)
+                let zip = Process()
+                zip.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
+                zip.arguments = ["-c", "-k", staging.path, out.path]
+                try zip.run()
+                zip.waitUntilExit()
+                try? fm.removeItem(at: staging)
+
+                await MainActor.run {
+                    AppState.shared.showNote("Diagnostics saved to Desktop")
+                    NSWorkspace.shared.activateFileViewerSelecting([out])
+                }
+            } catch {
+                await MainActor.run {
+                    AppState.shared.showNote("Couldn't save diagnostics: \(error.localizedDescription)")
+                }
+            }
+        }
     }
 
     // MARK: - Helpers
@@ -993,6 +1160,8 @@ final class AppState: ObservableObject {
 
     private func setStatus(_ newStatus: Status) {
         status = newStatus
+        syncBusyMarker(for: newStatus)
+        armProcessingWatchdog(for: newStatus)
 
         // The voice animation and the "Can't hear you" hint are only meaningful
         // while capturing; settle both on every other transition. (A .recording →
@@ -1024,6 +1193,63 @@ final class AppState: ObservableObject {
             case .error, .noInputField: self.status = .idle
             default: break
             }
+        }
+    }
+
+    // MARK: - Updater busy marker & stuck-state recovery
+
+    /// While a dictation is active, `~/.localflow/dictating` exists (its mtime
+    /// refreshed on every transition); the hourly auto-updater refuses to relaunch
+    /// the app while a FRESH marker is present, so an update can never destroy an
+    /// in-flight dictation. A stale marker (crash mid-dictation) is ignored by the
+    /// updater after 10 minutes. File ops run off the main thread.
+    private static let busyMarkerURL = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent(".localflow/dictating")
+    private func syncBusyMarker(for newStatus: Status) {
+        let busy: Bool
+        switch newStatus {
+        case .recording, .recordingLocked, .transcribing, .cleaning, .pasting: busy = true
+        default: busy = false
+        }
+        let url = Self.busyMarkerURL
+        DispatchQueue.global(qos: .utility).async {
+            if busy {
+                try? FileManager.default.createDirectory(
+                    at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+                FileManager.default.createFile(atPath: url.path, contents: nil)
+            } else {
+                try? FileManager.default.removeItem(at: url)
+            }
+        }
+    }
+
+    /// Recovery net of last resort: no processing state may live longer than 90s.
+    /// Every known stall is individually bounded (STT watchdogs, load budgets,
+    /// cleanup timeouts) — if an unknown one slips through, this turns "wedged
+    /// forever" into a 90-second hiccup with an honest error. Recording states are
+    /// excluded (bounded by autoStop) and .loadingModel is excluded (first-run
+    /// downloads legitimately run for many minutes under their own budget).
+    private func armProcessingWatchdog(for newStatus: Status) {
+        processingWatchdogTask?.cancel()
+        processingWatchdogTask = nil
+        switch newStatus {
+        case .transcribing, .cleaning, .pasting:
+            let snapshot = newStatus
+            processingWatchdogTask = Task { [weak self] in
+                try? await Task.sleep(nanoseconds: 90 * 1_000_000_000)
+                guard let self, !Task.isCancelled, self.status == snapshot else { return }
+                EventLog.log("watchdog.forcedRecovery", ["stuck": snapshot.menuText])
+                self.pipelineCancelled = true
+                self.supervisorTask?.cancel()
+                self.liveSource = nil
+                self.incremental = nil
+                self.supervisorTask = nil
+                self.partialText = ""
+                self.reloadEngine()
+                self.setStatus(.error("That dictation got stuck — recovered. Please dictate it again."))
+            }
+        default:
+            break
         }
     }
 }

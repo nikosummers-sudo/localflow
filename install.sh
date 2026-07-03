@@ -26,22 +26,41 @@ TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 bold "Downloading LocalFlow…"
 curl -fsSL "$MANIFEST_URL" -o "$TMP/latest.json" || fail "Couldn't reach the release manifest."
-URL="$(plutil -extract url raw -o - "$TMP/latest.json")"
-WANT_SHA="$(plutil -extract sha256 raw -o - "$TMP/latest.json")"
-BUILD="$(plutil -extract build raw -o - "$TMP/latest.json")"
-[ -n "$URL" ] && [ -n "$WANT_SHA" ] || fail "Malformed release manifest."
+# Guard each plutil extraction: behind a captive portal / SSL-inspecting proxy,
+# curl can succeed with an HTML page — without the guards, set -e aborts with a
+# raw plutil error instead of the friendly message below.
+URL="$(plutil -extract url raw -o - "$TMP/latest.json" 2>/dev/null || echo "")"
+WANT_SHA="$(plutil -extract sha256 raw -o - "$TMP/latest.json" 2>/dev/null || echo "")"
+BUILD="$(plutil -extract build raw -o - "$TMP/latest.json" 2>/dev/null || echo "")"
+[ -n "$URL" ] && [ -n "$WANT_SHA" ] || fail "Malformed release manifest (are you behind a captive portal or proxy?)."
 
 curl -fsSL "$URL" -o "$TMP/LocalFlow.app.zip" || fail "Couldn't download the app."
 GOT_SHA="$(shasum -a 256 "$TMP/LocalFlow.app.zip" | awk '{print $1}')"
 [ "$GOT_SHA" = "$WANT_SHA" ] || fail "Checksum mismatch — download corrupted, please retry."
 ditto -x -k "$TMP/LocalFlow.app.zip" "$TMP/unpacked" || fail "Couldn't unpack the app."
 [ -d "$TMP/unpacked/LocalFlow.app" ] || fail "Downloaded archive had no app."
+# Verify the app is signed with LocalFlow's stable identity before installing —
+# the sha only proves it matches the manifest, not that it's our build.
+codesign --verify --deep --strict "$TMP/unpacked/LocalFlow.app" >/dev/null 2>&1 \
+  || fail "Downloaded app fails signature verification — refusing to install."
+SIG_OUT="$(codesign -dvv "$TMP/unpacked/LocalFlow.app" 2>&1)"
+case "$SIG_OUT" in
+  *"Authority=LocalFlow Dev Signing"*) : ;;
+  *) fail "Downloaded app isn't signed by LocalFlow Dev Signing — refusing to install." ;;
+esac
 
 # ── 3. Install to /Applications (fall back to ~/Applications) ────────────────
 DEST="/Applications"; [ -w "$DEST" ] || { DEST="$HOME/Applications"; mkdir -p "$DEST"; }
 bold "Installing to ${DEST}…"
 pkill -x LocalFlow 2>/dev/null || true
 sleep 1
+# Remove a copy in the OTHER location too — two coexisting installs would leave
+# one permanently stale (the updater only ever touches /Applications first).
+if [ "$DEST" = "/Applications" ]; then
+  rm -rf "$HOME/Applications/LocalFlow.app" 2>/dev/null || true
+elif [ -d "/Applications/LocalFlow.app" ]; then
+  echo "⚠️  Another copy exists in /Applications that this user can't replace — it will stay in use. Ask an admin to re-run the installer."
+fi
 rm -rf "$DEST/LocalFlow.app"
 ditto "$TMP/unpacked/LocalFlow.app" "$DEST/LocalFlow.app"
 # Clear the download quarantine so it opens without a Gatekeeper prompt.
@@ -138,7 +157,7 @@ else
 fi
 
 [ "$APP_RUNNING" = "yes" ] && APP_SUM="✓" || APP_SUM="✗ not running — Cmd+Space, type LocalFlow, Return"
-[ "$AI_STATUS" = "ready" ] && AI_SUM="✓ ready" || AI_SUM="✗ not set up — LocalFlow finishes it on next launch"
+[ "$AI_STATUS" = "ready" ] && AI_SUM="✓ ready" || AI_SUM="✗ finishing later — open Ollama once (click through its welcome window); LocalFlow does the rest"
 printf '\n────────────────────────────────────────────────────────────\n'
 echo "LocalFlow install summary  (build $BUILD)"
 echo "  App installed & running:  $APP_SUM"

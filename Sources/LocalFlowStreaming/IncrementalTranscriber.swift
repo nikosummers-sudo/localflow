@@ -204,7 +204,7 @@ public actor IncrementalTranscriber {
         var failed = false
         if voiced {
             let started = DispatchTime.now()
-            if let text = await transcribeWithRetry(chunk, part: "chunk\(index)") {
+            if let text = await transcribeWithRetry(chunk, part: "chunk\(index)", stallEvent: "chunk.stall", index: index) {
                 // Encode command phrases on the RAW chunk, before cleanup can mangle
                 // the literal words. Placeholders survive cleanup and the raw-fallback
                 // path, then decode at the final choke point.
@@ -270,7 +270,7 @@ public actor IncrementalTranscriber {
 
         let started = DispatchTime.now()
         var failed = false
-        if let text = await transcribeWithRetry(tail, part: "tail") {
+        if let text = await transcribeWithRetry(tail, part: "tail", stallEvent: "tail.stall", index: nil) {
             tailRaw = voiceCommandsEnabled ? encodeCommands(text) : text
         } else {
             failed = true
@@ -352,24 +352,42 @@ public actor IncrementalTranscriber {
 
     // MARK: - Helpers
 
-    /// Transcribes with ONE retry. Returns the text on success (possibly empty, which
-    /// is a valid "nothing intelligible" result), or nil if the engine threw on both
-    /// attempts. A thrown error used to be swallowed into "" via `try?`, which made a
-    /// failed chunk — e.g. the front of a long dictation — disappear with no signal;
-    /// nil lets the caller count the failure and surface a note. Both throws are logged
-    /// (error descriptions only — no transcript content).
-    private func transcribeWithRetry(_ samples: [Float], part: String) async -> String? {
-        do {
-            return try await engine.transcribe(samples: samples)
-        } catch {
-            EventLog.log("stt.retry", ["part": part, "error": String(describing: error)])
+    /// Wall-clock budget for a single streaming STT attempt. A CoreML/ANE stall
+    /// parks the transcribe call forever (thread sample showed it stuck in
+    /// ANEServices); the single-pass path already guards this via
+    /// `transcribeOrTimeout`, and the streaming chunk/tail path must too — a bare
+    /// `transcribe` here lets one stall wedge dictation permanently. 30s matches
+    /// the single-pass first-try budget.
+    private static let sttTimeoutSeconds: Double = 30
+
+    /// Transcribes with ONE retry, each attempt bounded by the stall watchdog.
+    /// Returns the text on success (possibly empty — a valid "nothing intelligible"
+    /// result), or nil if the engine failed or stalled on every attempt; nil lets
+    /// the caller count the failure and surface a note, so a dropped chunk never
+    /// vanishes silently. `transcribeOrTimeout` collapses a thrown error and a
+    /// timeout into nil, so we classify by elapsed time: a stall burns the full
+    /// budget, a genuine STT error returns fast. A stall poisons the engine (its
+    /// model was just discarded by the watchdog), so we fail fast rather than retry
+    /// into another full-budget wait. Never throws upward. Logs metadata only
+    /// (indices/durations) — never transcript text.
+    private func transcribeWithRetry(
+        _ samples: [Float], part: String, stallEvent: String, index: Int?
+    ) async -> String? {
+        for attempt in 0..<2 {
+            let started = DispatchTime.now()
+            if let text = await engine.transcribeOrTimeout(samples: samples, seconds: Self.sttTimeoutSeconds) {
+                return text
+            }
+            let elapsedS = Self.elapsedMs(since: started) / 1000
+            if elapsedS >= Self.sttTimeoutSeconds * 0.9 {
+                var meta = ["seconds": String(format: "%.0f", elapsedS)]
+                if let index { meta["index"] = String(index) }
+                EventLog.log(stallEvent, meta)
+                return nil  // wedged engine — a retry would just stall for another full budget
+            }
+            EventLog.log(attempt == 0 ? "stt.retry" : "stt.failed", ["part": part])
         }
-        do {
-            return try await engine.transcribe(samples: samples)
-        } catch {
-            EventLog.log("stt.failed", ["part": part, "error": String(describing: error)])
-            return nil
-        }
+        return nil
     }
 
     private static func rms(_ samples: [Float], from offset: Int, count: Int) -> Float {

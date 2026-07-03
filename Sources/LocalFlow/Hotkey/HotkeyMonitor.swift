@@ -22,10 +22,13 @@ import LocalFlowKit
 final class HotkeyMonitor {
     /// Space — locks recording while a modifier-hold shortcut is held.
     private static let spaceKeyCode: Int64 = 49
+    /// Escape — cancels an in-progress recording (discards it, nothing inserted).
+    private static let escapeKeyCode: Int64 = 53
 
     var onKeyDown: (() -> Void)?
     var onKeyUp: (() -> Void)?
     var onLockEngaged: (() -> Void)?
+    var onCancel: (() -> Void)?
 
     private enum State {
         case idle
@@ -142,6 +145,14 @@ final class HotkeyMonitor {
         return start()
     }
 
+    /// Resets the gesture state machine without touching the tap. Called when a
+    /// key-down's dictation start was refused (permissions, audio error), so a
+    /// Space/lock press can't latch a recording that never began.
+    func resetGesture() {
+        state = .idle
+        pendingKeyUpConsume = nil
+    }
+
     /// Handles one tapped event. Returns true iff the event should be consumed. Runs on
     /// the main run loop, so it reads/writes state synchronously and keeps work trivial.
     private func handle(type: CGEventType, event: CGEvent) -> Bool {
@@ -171,6 +182,14 @@ final class HotkeyMonitor {
                 state = .lockedRecording
                 fire(onLockEngaged)
                 return true // swallow the Space so it doesn't type into the focused app
+            }
+            // Esc during a recording cancels it (discard, insert nothing) — the
+            // standard "abort" affordance. Swallowed so it doesn't also close a
+            // dialog in the focused app.
+            if code == HotkeyMonitor.escapeKeyCode, state != .idle {
+                state = .idle
+                fire(onCancel)
+                return true
             }
             return false
         }
@@ -212,6 +231,13 @@ final class HotkeyMonitor {
         }
 
         guard type == .keyDown else { return false } // ignore flagsChanged in combo mode
+
+        // Esc cancels a hands-free recording, mirroring the hold gesture.
+        if code == HotkeyMonitor.escapeKeyCode, state != .idle {
+            state = .idle
+            fire(onCancel)
+            return true
+        }
 
         guard HotkeyBinding.matchesCombo(eventKeyCode: code, eventFlags: event.flags, binding: binding) else {
             return false

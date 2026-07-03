@@ -33,11 +33,15 @@ public enum AudioGate {
     /// burst yet long enough for a stable RMS estimate.
     public static let frameSeconds: Double = 0.1
 
-    /// Whether the buffer contains at least `minVoicedFrames` non-overlapping
-    /// 100 ms frames whose RMS exceeds `speechThreshold`. Scans in whole frames and
-    /// returns early as soon as the bar is cleared.
+    /// Whether the buffer contains at least `minVoicedFrames` voiced 100 ms frames
+    /// whose RMS exceeds `speechThreshold`, scanned with a 50 ms hop so successive
+    /// windows overlap by half. Overlapping windows let a short word (~0.25 s) still
+    /// present three voiced frames — which non-overlapping 100 ms frames can't — while
+    /// the unchanged RMS threshold keeps steady noise out. Returns early once cleared.
     public static func containsSpeech(_ samples: [Float], sampleRate: Double = 16000) -> Bool {
         let frameSamples = max(1, Int(frameSeconds * sampleRate))
+        // 50 ms hop = half the 100 ms window, i.e. 50% overlap between frames.
+        let hopSamples = max(1, frameSamples / 2)
         var voiced = 0
         var i = 0
         while i + frameSamples <= samples.count {
@@ -45,7 +49,7 @@ public enum AudioGate {
                 voiced += 1
                 if voiced >= minVoicedFrames { return true }
             }
-            i += frameSamples
+            i += hopSamples
         }
         return false
     }

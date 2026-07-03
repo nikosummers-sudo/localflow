@@ -8,6 +8,7 @@ final class HUDViewModel: ObservableObject {
     enum Phase: Equatable {
         case hidden
         case listening(locked: Bool)
+        case warmingUp
         case transcribing
         case cleaning
         case inserting
@@ -126,6 +127,11 @@ struct HUDView: View {
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(.white.opacity(0.7))
             }
+        case .warmingUp:
+            ProgressView()
+                .controlSize(.small)
+                .tint(.white)
+            label("Warming up…")
         case .transcribing:
             ProgressView()
                 .controlSize(.small)

@@ -28,6 +28,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         hotkeyMonitor.onKeyDown = { AppState.shared.startDictation() }
         hotkeyMonitor.onKeyUp = { AppState.shared.stopDictation() }
         hotkeyMonitor.onLockEngaged = { AppState.shared.lockDictation() }
+        hotkeyMonitor.onCancel = { AppState.shared.cancelDictation() }
+        // A refused start (permissions, audio error) resets the gesture machine so
+        // a Space press can't latch a "recording" that never began.
+        AppState.shared.onDictationFailedToStart = { [weak self] in
+            self?.hotkeyMonitor.resetGesture()
+        }
+
+        // Surface "what changed" after an auto-update: the updater swaps builds
+        // silently, so the first launch of a new build says so in the menu bar.
+        let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?"
+        let short = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
+        let seen = UserDefaults.standard.string(forKey: "lastSeenBuild")
+        if let seen, seen != build {
+            AppState.shared.showNote("Updated to v\(short) (build \(build))")
+        }
+        UserDefaults.standard.set(build, forKey: "lastSeenBuild")
 
         // A dictation blocked by a denied Microphone permission asks us to open
         // Setup so the user can turn it on (AppState can't reach the windows).
@@ -151,6 +167,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             window.isReleasedWhenClosed = false
             window.minSize = NSSize(width: 560, height: 400)
             window.center()
+            // Remember size/position across launches (overrides the center()
+            // default once a saved frame exists).
+            window.setFrameAutosaveName("LocalFlowMain")
             mainWindow = window
         }
         present(mainWindow)
@@ -192,6 +211,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let view = SettingsView(
                 onModelChanged: { AppState.shared.reloadEngine() },
                 onHotkeyChanged: { [weak self] in
+                    // Restarting the tap resets its gesture machine — finish (not
+                    // discard) any live recording first so the user's words land.
+                    if AppState.shared.status.isRecording { AppState.shared.stopDictation() }
                     self?.hotkeyMonitor.restart()
                     self?.syncHotkeyHealth()
                     AppState.shared.refreshHotkeyBinding()

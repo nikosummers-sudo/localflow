@@ -51,8 +51,19 @@ final class AudioRecorder {
 
     /// Delivers a normalized 0–1 microphone level for the HUD's voice-reactive
     /// animation. Invoked from the audio tap thread, throttled to ~15 Hz. Emitted
-    /// ONLY while dictating so the pill doesn't dance outside dictations.
-    var onLevel: ((Float) -> Void)?
+    /// ONLY while dictating so the pill doesn't dance outside dictations. Backed by
+    /// `_onLevel` and guarded by `lock` so the audio thread never tears a half-written
+    /// closure while the app layer (main thread) assigns it.
+    private var _onLevel: ((Float) -> Void)?
+    var onLevel: ((Float) -> Void)? {
+        get { lock.lock(); defer { lock.unlock() }; return _onLevel }
+        set { lock.lock(); defer { lock.unlock() }; _onLevel = newValue }
+    }
+
+    /// Invoked on the main queue when a saved input-device UID no longer resolves
+    /// and capture falls back to the system default — carries the fallback device's
+    /// name so the app layer can surface a "your mic changed" notice. Best-effort.
+    var onInputDeviceFallback: ((String) -> Void)?
 
     private var lastLevelEmit: CFAbsoluteTime = 0
     private let levelEmitInterval: CFAbsoluteTime = 1.0 / 15.0
@@ -225,6 +236,30 @@ final class AudioRecorder {
         onLevel?(0)
     }
 
+    /// Rebuilds continuous capture after the machine wakes from sleep. macOS can
+    /// leave the engine stopped or the tap feeding silence across a sleep/wake cycle
+    /// with no configuration-change notification, so the app layer calls this on
+    /// NSWorkspace.didWake (wired there, not here). No-op when not continuously
+    /// capturing or mid-dictation — a live dictation is never rebuilt out from under.
+    /// Best-effort: on failure capture is left stopped and the next beginRecording()
+    /// self-heals.
+    func handleWake() {
+        engineLock.lock()
+        defer { engineLock.unlock() }
+        guard captureMode, !dictating else { return }
+        removeTapLocked()
+        engine.stop()
+        do {
+            try installTapLocked()
+            try startEngineLocked()
+            EventLog.log("audio.wake.rebuild", ["result": "ok"])
+        } catch {
+            captureMode = false
+            onLevel?(0)
+            EventLog.log("audio.wake.rebuild", ["result": "failed"])
+        }
+    }
+
     // MARK: - Dictation lifecycle
 
     /// Begins a dictation. In continuous mode this seeds the recording buffer with
@@ -235,6 +270,17 @@ final class AudioRecorder {
         defer { engineLock.unlock() }
 
         if captureMode {
+            // Self-heal: continuous capture can silently die (sleep/wake, route glitch,
+            // a failed config-change rebuild) leaving a stopped engine or dropped tap
+            // that still reads as "live". Verify it's genuinely capturing before seeding
+            // — otherwise we'd seed a stale ring and record silence. Rebuild against the
+            // current input if not; a rebuild failure throws, exactly as the legacy path.
+            if !engine.isRunning || !tapInstalled {
+                removeTapLocked()
+                try installTapLocked()
+                try startEngineLocked()
+                EventLog.log("engine.selfheal", ["result": "rebuilt"])
+            }
             lock.lock()
             let preRoll = Int(preRollSeconds * AudioRecorder.targetSampleRate)
             samples = ring.count > preRoll ? Array(ring.suffix(preRoll)) : ring
@@ -321,6 +367,13 @@ final class AudioRecorder {
         guard let deviceID = InputDevices.deviceID(forUID: uid),
               let unit = engine.inputNode.audioUnit else {
             EventLog.log("input.device", ["uid": uid, "result": "unresolved-default"])
+            // The saved mic vanished; we're falling back to the default. Tell the app
+            // layer so it can surface a notice. Name lookup is lock-free —
+            // inputDescription() would re-enter engineLock (held here) and deadlock.
+            if let onInputDeviceFallback {
+                let name = Self.defaultInputDeviceName() ?? "the default microphone"
+                DispatchQueue.main.async { onInputDeviceFallback(name) }
+            }
             return
         }
         var dev = AudioDeviceID(deviceID)
@@ -373,7 +426,11 @@ final class AudioRecorder {
                 "inputHz": String(format: "%.0f", engine.inputNode.inputFormat(forBus: 0).sampleRate),
             ])
         } catch {
-            // Leave capture stopped; the next beginRecording() will retry a start.
+            // Signal capture is down (matching restartContinuousCapture /
+            // reconfigureInputDevice) so nothing trusts a dead engine; the next
+            // beginRecording() self-heals and retries a start.
+            captureMode = false
+            onLevel?(0)
             EventLog.log("engine.configchange", ["result": "failed"])
         }
     }

@@ -14,7 +14,12 @@ mkdir -p "$HOME/.localflow"
 exec >>"$LOG" 2>&1
 [ -f "$LOG" ] && [ "$(wc -l <"$LOG")" -gt 500 ] && { tail -n 200 "$LOG" >"$LOG.tmp" && mv "$LOG.tmp" "$LOG"; }
 
-# One updater at a time.
+# One updater at a time. A previous run killed hard (power loss, force reboot)
+# leaves the lock dir behind and would block updates FOREVER — treat a lock
+# older than 2 hours as stale and clear it.
+if [ -d "$LOCK" ] && [ -n "$(find "$LOCK" -maxdepth 0 -mmin +120 2>/dev/null)" ]; then
+  rmdir "$LOCK" 2>/dev/null || true
+fi
 if ! mkdir "$LOCK" 2>/dev/null; then echo "$(date '+%F %T') another update running"; exit 0; fi
 trap 'rmdir "$LOCK" 2>/dev/null || true' EXIT
 
@@ -31,6 +36,8 @@ APP="/Applications/LocalFlow.app"
 [ -d "$APP" ] || APP="$HOME/Applications/LocalFlow.app"
 [ -d "$APP" ] || { echo "$(date '+%F %T') no installed app — run the installer"; exit 0; }
 DEST_DIR="$(dirname "$APP")"
+# Clear debris a previously-interrupted swap may have left beside the app.
+rm -rf "$DEST_DIR/LocalFlow.app.new" "$DEST_DIR/LocalFlow.app.old" 2>/dev/null || true
 
 # Fetch the manifest and parse it with plutil (always present; handles JSON).
 TMP="$(mktemp -d)"
@@ -57,15 +64,58 @@ NEW_APP="$TMP/unpacked/LocalFlow.app"
 # Sanity: the downloaded app must be the expected build before we swap.
 DL_BUILD="$(defaults read "$NEW_APP/Contents/Info.plist" CFBundleVersion 2>/dev/null || echo 0)"
 [ "$DL_BUILD" = "$LATEST_BUILD" ] || { echo "$(date '+%F %T') downloaded build $DL_BUILD != $LATEST_BUILD — refusing"; exit 0; }
+
+# The sha256 only proves the download matches the manifest — and both come from
+# the same repo, so a compromised repo (or account) could serve arbitrary code
+# with a matching sha. Require the stable signing identity ON THE CLIENT before
+# anything replaces the live app. (Captured string, not a grep pipe — codesign's
+# stderr + pipefail would false-fail.)
+if ! codesign --verify --deep --strict "$NEW_APP" >/dev/null 2>&1; then
+  echo "$(date '+%F %T') downloaded app FAILS signature verification — refusing"; exit 0
+fi
+SIG_OUT="$(codesign -dvv "$NEW_APP" 2>&1)"
+case "$SIG_OUT" in
+  *"Authority=LocalFlow Dev Signing"*) : ;;
+  *) echo "$(date '+%F %T') downloaded app not signed by LocalFlow Dev Signing — refusing"; exit 0 ;;
+esac
 xattr -dr com.apple.quarantine "$NEW_APP" 2>/dev/null || true
+
+# Never kill a dictation in flight. The app maintains this marker while it is
+# recording/transcribing/inserting; a FRESH marker defers the update to the next
+# hourly run. A stale one (>10 min — the app crashed mid-dictation) is ignored.
+BUSY="$HOME/.localflow/dictating"
+if [ -f "$BUSY" ] && [ -n "$(find "$BUSY" -mmin -10 2>/dev/null)" ]; then
+  echo "$(date '+%F %T') dictation in progress — deferring to next run"; exit 0
+fi
+
+# One updater per DESTINATION: two users on one Mac share /Applications, and
+# their per-user locks don't serialize each other. Same stale-lock healing.
+DEST_LOCK="$DEST_DIR/.localflow-update.lock"
+if [ -d "$DEST_LOCK" ] && [ -n "$(find "$DEST_LOCK" -maxdepth 0 -mmin +120 2>/dev/null)" ]; then
+  rmdir "$DEST_LOCK" 2>/dev/null || true
+fi
+if ! mkdir "$DEST_LOCK" 2>/dev/null; then
+  echo "$(date '+%F %T') another user's updater holds the destination — deferring"; exit 0
+fi
+trap 'rmdir "$DEST_LOCK" 2>/dev/null || true; rm -rf "$TMP"; rmdir "$LOCK" 2>/dev/null || true' EXIT
 
 WAS_RUNNING=0
 pgrep -x LocalFlow >/dev/null && WAS_RUNNING=1
 pkill -x LocalFlow 2>/dev/null || true
 sleep 1
-rm -rf "$DEST_DIR/LocalFlow.app"
-ditto "$NEW_APP" "$DEST_DIR/LocalFlow.app"
+
+# Atomic swap: stage the new copy NEXT TO the live app (same volume, so mv is a
+# rename), then swap. The live app is never half-written; power loss leaves the
+# old OR the new app intact, plus debris the next run clears.
+ditto "$NEW_APP" "$DEST_DIR/LocalFlow.app.new"
+mv "$DEST_DIR/LocalFlow.app" "$DEST_DIR/LocalFlow.app.old" 2>/dev/null || true
+if ! mv "$DEST_DIR/LocalFlow.app.new" "$DEST_DIR/LocalFlow.app"; then
+  echo "$(date '+%F %T') swap failed — restoring previous app"
+  mv "$DEST_DIR/LocalFlow.app.old" "$DEST_DIR/LocalFlow.app" 2>/dev/null || true
+  exit 0
+fi
+rm -rf "$DEST_DIR/LocalFlow.app.old" 2>/dev/null || true
 xattr -dr com.apple.quarantine "$DEST_DIR/LocalFlow.app" 2>/dev/null || true
-[ "$WAS_RUNNING" = 1 ] && open "$DEST_DIR/LocalFlow.app"
+if [ "$WAS_RUNNING" = 1 ]; then open "$DEST_DIR/LocalFlow.app"; fi
 
 echo "$(date '+%F %T') updated to build $LATEST_BUILD OK"
