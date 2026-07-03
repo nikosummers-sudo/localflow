@@ -884,30 +884,40 @@ final class AppState: ObservableObject {
             let result = await transcriber.assembleFinalText()
 
             // Refine mode: the chunks were cleaned conservatively while the user
-            // talked; now run ONE refine pass over the full assembled text so the
-            // reformatting sees the whole point. Falls back to the assembled text
-            // on any guard failure or timeout — never worse than clean mode.
+            // talked; now run ONE refine pass so the reformatting sees the whole
+            // point. It consumes the RAW assembled transcript — refining the
+            // chunk-cleaned text doesn't work (field-tested): neatly punctuated
+            // waffle looks "already fine" to the model and it backs off. Falls
+            // back to the chunk-cleaned assembly on any guard failure or timeout,
+            // so refine is never worse than clean mode.
             var finalText = result.text
+            var historyRaw: String?
             let note = result.note
-            if cleanupMode() == .refine, effectiveCleanupEnabled(),
-               finalText.count >= TranscriptCleaner.minLength {
-                setStatus(.cleaning)
-                let refined = await cleaner.clean(
-                    finalText,
-                    budgetSeconds: TranscriptCleaner.refineBudgetSeconds(for: finalText),
-                    context: makeCleanupContext()
-                )
-                EventLog.log("refine", [
-                    "path": "streaming",
-                    "result": refined.note == nil ? "ok" : "fallback",
-                    "chars": String(finalText.count),
-                ])
-                if refined.note == nil {
-                    finalText = refined.text
+            if cleanupMode() == .refine, effectiveCleanupEnabled() {
+                let rawAssembled = await transcriber.assembledRawText()
+                if rawAssembled.count >= TranscriptCleaner.minLength {
+                    setStatus(.cleaning)
+                    let refined = await cleaner.clean(
+                        rawAssembled,
+                        budgetSeconds: TranscriptCleaner.refineBudgetSeconds(for: rawAssembled),
+                        context: makeCleanupContext()
+                    )
+                    // Reason is one of the cleaner's fixed note strings — never
+                    // transcript content.
+                    EventLog.log("refine", [
+                        "path": "streaming",
+                        "result": refined.note == nil ? "ok" : "fallback",
+                        "reason": refined.note ?? "none",
+                        "chars": String(rawAssembled.count),
+                    ])
+                    if refined.note == nil {
+                        finalText = refined.text
+                        historyRaw = rawAssembled
+                    }
                 }
             }
-            // Keep the assembled (pre-refine) text recoverable when refine changed it.
-            await finishInsertion(text: finalText, note: note, raw: finalText != result.text ? result.text : nil)
+            // Keep what was actually said recoverable whenever refine rewrote it.
+            await finishInsertion(text: finalText, note: note, raw: historyRaw)
         }
     }
 

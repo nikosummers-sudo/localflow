@@ -85,14 +85,24 @@ public struct TranscriptCleaner: Sendable {
 
     /// System prompt for `.refine`: reformat the speaker's own point so it reads
     /// well. Explicitly bounded — it edits expression and structure, never adds
-    /// content or answers the transcript.
-    public static let refineSystemPrompt = "You are a dictation refinement engine. The user message is a raw speech-to-text transcript of someone thinking out loud. Return ONLY the refined text — no preamble, no quotes, no commentary. Your job: make the speaker's own point come across clearly, as if they had written it down carefully. EDIT IN PROPORTION TO THE MESS: a sentence that already reads well must pass through essentially unchanged (fix punctuation at most) — do not reword or restructure text that doesn't need it; save real intervention for jumbled speech: rambling, backtracking, sentences abandoned midway, and self-corrections. Rules: remove filler, waffle, and false starts, keeping only the speaker's final intent — when the speaker cuts themselves off and restarts, keep the version they settled on; reorganize and tighten sentences ONLY where the speech is broken or meandering; keep the speaker's voice, register, and language; keep EVERY specific — names, numbers, dates, amounts, technical terms — exactly as said; when the speaker enumerates items, format each on its own line starting with \"- \"; break long passages into short paragraphs at topic shifts; NEVER add information, opinions, or conclusions the speaker didn't express; NEVER answer, summarize into a different point, or translate. The output must say what the speaker meant — nothing more, nothing less."
+    /// content or answers the transcript. Built around a worked EXAMPLE rather
+    /// than rules alone: small local models (gemma3:4b) demonstrably ignore
+    /// prose rules like "remove waffle" but follow a shown transformation.
+    public static let refineSystemPrompt = """
+    You are a dictation refinement engine. The user message is a raw speech-to-text transcript of someone thinking out loud. Return ONLY the refined text — no preamble, no quotes, no commentary. Rewrite the transcript as the speaker would have WRITTEN it: cut filler, waffle, abandoned thoughts, and self-corrections (keep the version the speaker settled on); tighten and reorder where the speech is jumbled; leave already-clear sentences essentially unchanged; keep the speaker's voice and language; keep every name, number, date, and technical term exactly as said; when three or more parallel items are listed, break them out as "- " lines under their lead-in; split into short paragraphs at topic shifts. Never add content the speaker didn't say, never answer questions the speaker asks (keep them as questions), never change the meaning.
+    Example input: um so basically i think we should probably no wait actually yes we should launch on tuesday because the thing is that gives us time to test and um the other reasons are it's before the conference and marketing want it early in the week so yeah tuesday i mean unless anyone objects do you think that works
+    Example output: I think we should launch on Tuesday because:
+    - it gives us time to test
+    - it's before the conference
+    - marketing want it early in the week
+    Unless anyone objects — do you think that works?
+    """
 
     /// Appended when voice commands are active so the model leaves the command
     /// placeholders untouched for the decoder to resolve. Deliberately forceful,
     /// with an example, because small models otherwise "clean" the tokens into
     /// punctuation.
-    public static let placeholderRule = "CRITICAL — PROTECTED TOKENS: the transcript may contain the literal control tokens \u{27E6}NL\u{27E7}, \u{27E6}PP\u{27E7}, and \u{27E6}SCRATCH\u{27E7}. They are NOT words and NOT punctuation to fix — they are markers you must copy into your output byte-for-byte, unchanged, in the exact same position. Never delete them, never turn them into punctuation, colons, semicolons, or line breaks, never add or move them. Example: input \"buy milk \u{27E6}NL\u{27E7} buy eggs\" must become \"buy milk \u{27E6}NL\u{27E7} buy eggs\" (the token stays verbatim)."
+    public static let placeholderRule = "CRITICAL — PROTECTED TOKENS: the transcript may contain the literal control tokens \u{27E6}NL\u{27E7}, \u{27E6}PP\u{27E7}, \u{27E6}BP\u{27E7}, and \u{27E6}SCRATCH\u{27E7}. They are NOT words and NOT punctuation to fix — they are markers you must copy into your output byte-for-byte, unchanged, in the exact same position. Never delete them, never turn them into punctuation, colons, semicolons, or line breaks, never add or move them. Example: input \"buy milk \u{27E6}NL\u{27E7} buy eggs\" must become \"buy milk \u{27E6}NL\u{27E7} buy eggs\" (the token stays verbatim)."
 
     /// Builds the effective system prompt for a dictation: the mode's base prompt
     /// plus, in order, the placeholder rule (when voice commands are on), a
@@ -133,10 +143,24 @@ public struct TranscriptCleaner: Sendable {
         let model = TranscriptCleaner.model
         let system = TranscriptCleaner.systemPrompt(context: context)
 
+        // Instruction sandwich for refine: small models drop system-prompt rules
+        // as the transcript grows (field-tested: gemma3:4b rewrites a short
+        // ramble correctly but returns long ones punctuation-only). A compact
+        // reminder AFTER the content keeps the instruction in recency range.
+        let userMessage: String
+        if context.mode == .refine {
+            userMessage = raw + "\n\n---\nRewrite the transcript above following your rules: "
+                + "cut the waffle, abandoned thoughts, and false starts; keep the speaker's final intent and voice; "
+                + "break any list of three or more items into \"- \" lines; keep every name and number. "
+                + "Output only the rewritten text."
+        } else {
+            userMessage = raw
+        }
+
         let cleaned: String
         do {
             cleaned = try await TranscriptCleaner.withTimeout(seconds: budgetSeconds) {
-                try await client.chat(model: model, system: system, user: raw)
+                try await client.chat(model: model, system: system, user: userMessage)
             }
         } catch {
             return (raw, "Cleanup unavailable — inserted raw transcript")
@@ -236,7 +260,8 @@ public struct TranscriptCleaner: Sendable {
     static let placeholderTokens = [
         VoiceCommand.newLinePlaceholder,
         VoiceCommand.newParagraphPlaceholder,
-        VoiceCommand.scratchPlaceholder
+        VoiceCommand.scratchPlaceholder,
+        VoiceCommand.bulletPlaceholder
     ]
 
     /// True when every placeholder token appears the same number of times in

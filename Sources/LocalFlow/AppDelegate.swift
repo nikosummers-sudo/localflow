@@ -58,6 +58,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Keep the login-item registration in sync with the saved setting (default on).
         LaunchAtLogin.reconcile()
 
+        // Ask for Input Monitoring BEFORE the first tap-creation attempt. Touching
+        // the keyboard-tap machinery first can leave TCC in a state where a later
+        // IOHIDRequestAccess silently no-ops — no prompt, no row in the pane, and
+        // a "Request" button that appears to do nothing (reproduced on a wiped
+        // machine). This is row-registration, not a modal, so it doesn't stack on
+        // the microphone prompt.
+        if !PermissionsManager.shared.inputMonitoringGranted {
+            PermissionsManager.shared.requestInputMonitoring()
+        }
+
         let tapStarted = hotkeyMonitor.start()
 
         // The HUD observes AppState and shows/hides itself as dictation proceeds.

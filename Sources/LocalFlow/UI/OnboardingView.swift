@@ -135,13 +135,16 @@ struct OnboardingView: View {
                 request: perms.requestAccessibility,
                 openSettings: perms.openAccessibilitySettings
             )
+            // No "Request" button here: macOS has no user-facing prompt for Input
+            // Monitoring (the app pre-registers its row at launch), so a Request
+            // button visibly does nothing and reads as broken. Straight to the pane.
             row(
                 title: "Input Monitoring",
                 why: "Detects your dictation shortcut being pressed, system-wide.",
                 granted: inputMonitoringGranted,
-                request: { _ = perms.requestInputMonitoring() },
+                request: nil,
                 openSettings: perms.openInputMonitoringSettings,
-                hint: "Not in the list? Click + and add LocalFlow from /Applications."
+                hint: "Turn on LocalFlow in the list. Not there? Click + and add it from the Applications folder."
             )
         }
     }
@@ -159,7 +162,7 @@ struct OnboardingView: View {
         title: String,
         why: String,
         granted: Bool,
-        request: @escaping () -> Void,
+        request: (() -> Void)? = nil,
         openSettings: @escaping () -> Void,
         hint: String? = nil
     ) -> some View {
@@ -174,14 +177,19 @@ struct OnboardingView: View {
                     .foregroundColor(.secondary)
                 if !granted {
                     HStack(spacing: 8) {
-                        Button("Request", action: request)
+                        if let request {
+                            Button("Request", action: request)
+                        }
                         Button("Open System Settings", action: openSettings)
                     }
                     .padding(.top, 2)
                     if let hint {
+                        // The escape hatch when macOS doesn't pre-list the app —
+                        // must be READABLE, not fine print (field-tested: users
+                        // stare past a gray caption while stuck).
                         Text(hint)
                             .font(.caption)
-                            .foregroundColor(.secondary)
+                            .foregroundColor(Color.ttOrange500)
                     }
                 }
             }

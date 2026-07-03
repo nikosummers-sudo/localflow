@@ -9,6 +9,7 @@ public enum VoiceCommand {
     public static let newLinePlaceholder = "\u{27E6}NL\u{27E7}"        // ⟦NL⟧
     public static let newParagraphPlaceholder = "\u{27E6}PP\u{27E7}"   // ⟦PP⟧
     public static let scratchPlaceholder = "\u{27E6}SCRATCH\u{27E7}"   // ⟦SCRATCH⟧
+    public static let bulletPlaceholder = "\u{27E6}BP\u{27E7}"         // ⟦BP⟧
 }
 
 private let sentenceTerminators: Set<Character> = [".", "!", "?"]
@@ -24,6 +25,9 @@ public func encodeCommands(_ text: String) -> String {
     s = replacePhrase(s, phrase: "new paragraph", with: VoiceCommand.newParagraphPlaceholder)
     s = replacePhrase(s, phrase: "new line", with: VoiceCommand.newLinePlaceholder)
     s = replacePhrase(s, phrase: "scratch that", with: VoiceCommand.scratchPlaceholder)
+    // Deterministic list formatting: "bullet point" starts a "- " line, exactly,
+    // every time — no model judgment involved.
+    s = replacePhrase(s, phrase: "bullet point", with: VoiceCommand.bulletPlaceholder)
     return s
 }
 
@@ -43,6 +47,7 @@ public func decodeCommands(_ text: String) -> String {
     var result = applyScratch(text)
     result = result.replacingOccurrences(of: VoiceCommand.newParagraphPlaceholder, with: "\n\n")
     result = result.replacingOccurrences(of: VoiceCommand.newLinePlaceholder, with: "\n")
+    result = result.replacingOccurrences(of: VoiceCommand.bulletPlaceholder, with: "\n- ")
     // Any stray scratch token that survived (nothing to retract) is dropped.
     result = result.replacingOccurrences(of: VoiceCommand.scratchPlaceholder, with: "")
     return result

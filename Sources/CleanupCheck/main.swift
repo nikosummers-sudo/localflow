@@ -131,6 +131,13 @@ var liveArgs = args
 let useRefine = liveArgs.contains("--refine")
 liveArgs.removeAll { $0 == "--refine" }
 
+// --model <name>: run against a specific Ollama model (in-process override of
+// the cleanupModel default) for side-by-side quality/speed comparisons.
+if let flagIndex = liveArgs.firstIndex(of: "--model"), flagIndex + 1 < liveArgs.count {
+    UserDefaults.standard.set(liveArgs[flagIndex + 1], forKey: "cleanupModel")
+    liveArgs.removeSubrange(flagIndex...(flagIndex + 1))
+}
+
 let raw = liveArgs.isEmpty ? defaultSample : liveArgs.joined(separator: " ")
 
 let cleaner = TranscriptCleaner(client: OllamaClient())
@@ -141,6 +148,28 @@ let liveBudget = useRefine
 
 print("MODE: \(useRefine ? "refine" : "clean")")
 print("RAW: \(raw)")
+// On a guard fallback, also show the REJECTED model output and the guard's
+// view of it — the diagnosis for "refine ran but nothing changed" reports.
+// Mirror clean()'s refine instruction-sandwich so this debug view matches
+// what the app actually sends.
+let debugUser = useRefine
+    ? raw + "\n\n---\nRewrite the transcript above following your rules: "
+        + "cut the waffle, abandoned thoughts, and false starts; keep the speaker's final intent and voice; "
+        + "break any list of three or more items into \"- \" lines; keep every name and number. "
+        + "Output only the rewritten text."
+    : raw
+let preGuard = try? await OllamaClient().chat(
+    model: TranscriptCleaner.model,
+    system: TranscriptCleaner.systemPrompt(context: liveContext),
+    user: debugUser
+)
+if let preGuard {
+    let guarded = TranscriptCleaner.applyGuards(cleaned: preGuard, raw: raw, mode: liveContext.mode)
+    print("MODEL_OUTPUT: \(preGuard)")
+    print("RATIO: \(String(format: "%.2f", Double(preGuard.count) / Double(max(raw.count, 1))))")
+    print("JACCARD: \(String(format: "%.2f", TranscriptCleaner.wordSetJaccard(raw, preGuard)))")
+    print("GUARD: \(guarded.note ?? "accepted")")
+}
 let result = await cleaner.clean(raw, budgetSeconds: liveBudget, context: liveContext)
 print("CLEANED: \(result.text)")
 

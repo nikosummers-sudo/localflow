@@ -81,6 +81,21 @@ public struct OllamaClient: Sendable {
         request.httpBody = try JSONEncoder().encode(body)
         request.timeoutInterval = 8
 
+        // Ollama's server can refuse a connection for a beat between back-to-back
+        // requests (single-slot runner respawning under memory pressure) — field-
+        // reproduced: one request succeeds, the next is instantly refused. One
+        // short-backoff retry rides out the blip. Only connection-level failures
+        // retry: an HTTP error or a slow model must not double the wait.
+        do {
+            return try await sendChat(request)
+        } catch let error as URLError where
+            error.code == .cannotConnectToHost || error.code == .networkConnectionLost {
+            try await Task.sleep(nanoseconds: 400_000_000)
+            return try await sendChat(request)
+        }
+    }
+
+    private func sendChat(_ request: URLRequest) async throws -> String {
         let (data, response) = try await URLSession.shared.data(for: request)
         if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
             throw OllamaError.badStatus(http.statusCode)

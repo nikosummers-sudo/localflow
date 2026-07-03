@@ -285,6 +285,18 @@ public actor IncrementalTranscriber {
         ])
     }
 
+    /// The dictation as actually spoken: raw chunks + raw tail, joined with the
+    /// same whitespace normalization as the final text (voice-command tokens
+    /// already encoded). A full-text refine pass must consume THIS — the
+    /// chunk-cleaned assembly hides the mess (waffle punctuated into tidy
+    /// sentences), which makes a proportional refine model back off exactly
+    /// when it shouldn't. Call after `assembleFinalText()` so the tail is in.
+    public func assembledRawText() -> String {
+        var parts = rawChunks.filter { !$0.isEmpty }
+        if !tailRaw.isEmpty { parts.append(tailRaw) }
+        return normalizeInlineWhitespace(parts.joined(separator: " "))
+    }
+
     /// Awaits any outstanding chunk cleanups, cleans the tail, and joins all
     /// cleaned (or raw-fallback) chunks plus the tail into the final text.
     public func assembleFinalText() async -> StreamResult {

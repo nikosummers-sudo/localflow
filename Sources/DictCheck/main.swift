@@ -698,11 +698,20 @@ do {
 
 // The encoded placeholders themselves are the exact agreed tokens.
 do {
-    let encoded = encodeCommands("a new line b new paragraph c scratch that")
+    let encoded = encodeCommands("a new line b new paragraph c scratch that d bullet point e")
     check("encode emits the exact placeholder tokens",
           encoded.contains(VoiceCommand.newLinePlaceholder)
               && encoded.contains(VoiceCommand.newParagraphPlaceholder)
-              && encoded.contains(VoiceCommand.scratchPlaceholder))
+              && encoded.contains(VoiceCommand.scratchPlaceholder)
+              && encoded.contains(VoiceCommand.bulletPlaceholder))
+}
+
+// "bullet point" produces a deterministic "- " line — no model judgment.
+do {
+    let out = normalizeAfterCommands(decodeCommands(encodeCommands(
+        "things to do bullet point update the website bullet point email customers bullet point post in slack")))
+    check("bullet point command renders '- ' lines [\(show(out))]",
+          out == "things to do\n- update the website\n- email customers\n- post in slack")
 }
 
 // MARK: - Newline-preserving normalization
