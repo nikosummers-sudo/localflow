@@ -18,8 +18,8 @@ Paste this into Terminal:
 curl -fsSL https://raw.githubusercontent.com/nikosummers-sudo/localflow/main/install.sh | bash
 ```
 
-The installer builds LocalFlow from source on your Mac (which is why macOS trusts it — no
-Gatekeeper warnings), installs it to /Applications, and launches it. Then:
+The installer downloads the prebuilt, signed app, installs it to /Applications, and
+launches it — no building, no Command Line Tools, no password prompts. Then:
 
 1. Grant the three permissions in the Setup window and click **Relaunch LocalFlow**.
 2. AI cleanup is set up automatically as part of the install ([Ollama](https://ollama.com)
@@ -28,10 +28,11 @@ Gatekeeper warnings), installs it to /Applications, and launches it. Then:
 3. Your first dictation downloads the speech model (~1.6 GB, one-time). Wait for **Ready**
    in the menu bar, then hold **Right Option** anywhere and talk.
 
-**Updates are automatic.** The installer sets up a background agent that checks this repo
-hourly and quietly rebuilds and swaps in new versions — settings and permissions
-survive. You can also update immediately by pasting the install command again, or turn
-auto-updates off with:
+**Updates are automatic.** A background agent checks hourly for a new release and quietly
+downloads and swaps it in. Because every release is signed with the same identity, macOS
+keeps your permission grants across updates — **you grant the three permissions once, ever.**
+You can also update immediately by pasting the install command again, or turn auto-updates
+off with:
 
 ```bash
 launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.nikosummers.localflow.updater.plist \
@@ -68,16 +69,23 @@ launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.nikosummers.localflow.
 No Xcode is required — the app builds with Swift Package Manager and is assembled into a
 `.app` bundle by a small script.
 
-## Build & run
+## For developers: building & releasing
+
+End users don't build anything — they get the prebuilt app via the installer above. This
+section is for working on LocalFlow itself.
 
 ```bash
-make app     # compile (release) and assemble build/LocalFlow.app (ad-hoc signed)
+make app     # compile (release) and assemble build/LocalFlow.app
 make run     # the above, then launch it
 make smoke   # offline transcription self-test using the small "base" model
 make clean   # remove .build and build
 ```
 
-That's it. The menu bar shows a waveform icon when LocalFlow is running.
+**Cutting a release** (maintainer only): `bash Scripts/release.sh 0.2.1` builds, signs with
+the stable `LocalFlow Dev Signing` identity, publishes the app as a GitHub Release asset, and
+updates `latest.json` — the manifest every installed copy polls. Every install then updates
+itself within the hour. The signing identity must stay the same across releases, or macOS
+will reset users' permissions.
 
 ### Stable signing (recommended)
 
