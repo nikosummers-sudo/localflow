@@ -61,6 +61,42 @@ if args.contains("--selftest") {
     exit(failures == 0 ? 0 : 1)
 }
 
+// MARK: - Model-availability check (headless proof for the self-heal path)
+
+// Verifies the hasModel/availableModels plumbing the app's self-heal relies on.
+// Offline part exercises the pure matcher; the live part queries the real local
+// Ollama /api/tags and prints what it found. Exits non-zero if the server is
+// unreachable or if a model known to be absent is ever reported present.
+//
+//   CleanupCheck --model-check
+if args.contains("--model-check") {
+    let client = OllamaClient()
+
+    // Offline: prove the matcher logic without any server.
+    let sample = ["gemma3:4b", "llama3.2:latest", "nomic-embed-text:latest"]
+    print("modelListContains exact 'gemma3:4b':   \(OllamaClient.modelListContains(sample, "gemma3:4b"))")
+    print("modelListContains bare 'gemma3':        \(OllamaClient.modelListContains(sample, "gemma3"))")
+    print("modelListContains missing '…-model:1b': \(OllamaClient.modelListContains(sample, "definitely-missing-model:1b"))")
+
+    // Live: query the running Ollama server.
+    guard let available = await client.availableModels() else {
+        stderr("ERROR: Ollama unreachable at \(UserDefaults.standard.string(forKey: "ollamaURL") ?? OllamaClient.defaultBaseURL)")
+        exit(1)
+    }
+    print("AVAILABLE MODELS (\(available.count)): \(available.joined(separator: ", "))")
+
+    let present = await client.hasModel("gemma3:4b")
+    let missing = await client.hasModel("definitely-missing-model:1b")
+    print("hasModel(\"gemma3:4b\"): \(present)")
+    print("hasModel(\"definitely-missing-model:1b\"): \(missing)")
+
+    if missing {
+        stderr("FAIL: a nonexistent model reported present — self-heal would never trigger")
+        exit(1)
+    }
+    exit(0)
+}
+
 // MARK: - Placeholder-preservation check (live, hits Ollama)
 
 // Verifies the cleanup model leaves voice-command placeholders untouched when the

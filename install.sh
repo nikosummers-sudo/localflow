@@ -55,23 +55,39 @@ rm -rf "$DEST/LocalFlow.app"
 ditto build/LocalFlow.app "$DEST/LocalFlow.app"
 
 # ── 6. Ollama for AI transcript cleanup (auto-setup, opt-out) ────────────────
-OLLAMA_BIN="$(command -v ollama || true)"
-if [ -z "$OLLAMA_BIN" ] && [ -x "/Applications/Ollama.app/Contents/Resources/ollama" ]; then
-  OLLAMA_BIN="/Applications/Ollama.app/Contents/Resources/ollama"
-fi
+# Locates the Ollama CLI wherever it lives: Homebrew (on PATH), or inside the app
+# bundle. Newer Ollama builds ship the CLI at Contents/MacOS/ollama while older
+# ones used Contents/Resources/ollama, so try both rather than assuming one.
+# Always exits 0 (never aborts the install under `set -e`).
+detect_ollama_bin() {
+  if command -v ollama >/dev/null 2>&1; then command -v ollama; return 0; fi
+  local candidate
+  for candidate in \
+    "/Applications/Ollama.app/Contents/Resources/ollama" \
+    "/Applications/Ollama.app/Contents/MacOS/ollama"; do
+    if [ -x "$candidate" ]; then echo "$candidate"; return 0; fi
+  done
+  return 0
+}
 
+OLLAMA_BIN="$(detect_ollama_bin || true)"
+
+# Polls the server for up to ~150s. On its FIRST launch Ollama.app shows a welcome
+# window that must be clicked through before the local server starts, so we wait
+# generously and remind the user each poll rather than giving up after a few seconds.
 wait_for_ollama() {
   local i
-  for i in $(seq 1 30); do
+  for i in $(seq 1 15); do
     "$OLLAMA_BIN" list >/dev/null 2>&1 && return 0
-    sleep 2
+    echo "   …waiting for Ollama (${i}/15) — if its welcome window is open, click through it to start the server."
+    sleep 10
   done
   return 1
 }
 
 ollama_setup_note() {
-  echo "⚠️  Couldn't finish the AI-cleanup setup — dictation still works (transcripts inserted as heard)."
-  echo "   To add it later: install Ollama from https://ollama.com then run: ollama pull gemma3:4b"
+  echo "⚠️  Couldn't finish the AI-cleanup setup now — dictation still works (transcripts inserted as heard)."
+  echo "   LocalFlow will finish this itself on next launch, or add it manually: install Ollama from https://ollama.com then run: ollama pull gemma3:4b"
 }
 
 # AI cleanup is part of the package — install Ollama when it's missing.
@@ -81,7 +97,6 @@ if [ -z "$OLLAMA_BIN" ]; then
   if command -v brew >/dev/null 2>&1; then
     if brew install ollama; then
       brew services start ollama 2>/dev/null || { nohup ollama serve >/dev/null 2>&1 & }
-      OLLAMA_BIN="$(command -v ollama || true)"
     else
       ollama_setup_note
     fi
@@ -90,23 +105,37 @@ if [ -z "$OLLAMA_BIN" ]; then
     if curl -fL --progress-bar https://ollama.com/download/Ollama-darwin.zip -o "$OZIP" \
        && ditto -x -k "$OZIP" /Applications; then
       rm -f "$OZIP"
+      bold "⚠️  ACTION NEEDED: Ollama will open now — click through its welcome window once."
+      echo "   This one-time step starts Ollama's local server; AI cleanup can't finish until you do."
       open -a /Applications/Ollama.app
-      echo "If Ollama shows a welcome window, click through it — it starts the local server."
-      OLLAMA_BIN="/Applications/Ollama.app/Contents/Resources/ollama"
     else
       rm -f "$OZIP"
       ollama_setup_note
     fi
   fi
+  # Re-detect after install/extract — the binary now exists at one of the paths.
+  OLLAMA_BIN="$(detect_ollama_bin || true)"
 fi
 
+# Outcome drives the summary block at the end; "ready" once the model is present.
+AI_CLEANUP_STATUS="notset"
 if [ -n "$OLLAMA_BIN" ]; then
   if wait_for_ollama; then
     if "$OLLAMA_BIN" list 2>/dev/null | grep -q '^gemma3:4b'; then
       echo "✓ AI cleanup is ready (Ollama with gemma3:4b)."
+      AI_CLEANUP_STATUS="ready"
     else
       bold "Downloading the cleanup model (gemma3:4b, ~3.3 GB, one-time)…"
-      "$OLLAMA_BIN" pull gemma3:4b || ollama_setup_note
+      if "$OLLAMA_BIN" pull gemma3:4b; then
+        AI_CLEANUP_STATUS="ready"
+      else
+        echo "   First attempt failed — retrying the model download once…"
+        if "$OLLAMA_BIN" pull gemma3:4b; then
+          AI_CLEANUP_STATUS="ready"
+        else
+          ollama_setup_note
+        fi
+      fi
     fi
   else
     ollama_setup_note
@@ -157,3 +186,22 @@ double-click LocalFlow in /Applications.
 
 Updates install themselves automatically (checked every 6 hours).
 EOF
+
+# ── 9. Install summary (loud, and the last thing on screen) ──────────────────
+# Reaching here means the app install itself succeeded — `set -e` would have
+# aborted earlier otherwise — so those lines are honestly ✓. The AI-cleanup line
+# reflects the actual outcome computed in section 6.
+if [ "$AI_CLEANUP_STATUS" = "ready" ]; then
+  AI_SUMMARY="✓ ready"
+else
+  AI_SUMMARY="✗ not set up — LocalFlow will finish this itself on next launch, or run: ollama pull gemma3:4b"
+fi
+
+printf '\n'
+echo "────────────────────────────────────────────────────────────"
+echo "LocalFlow install summary"
+echo "  App installed & running:  ✓"
+echo "  Auto-updates:             ✓"
+echo "  AI cleanup (Ollama):      ${AI_SUMMARY}"
+echo "  Next: grant the 3 permissions in the Setup window."
+echo "────────────────────────────────────────────────────────────"

@@ -348,6 +348,15 @@ Menu bar → **Settings…**:
 
 ## Troubleshooting
 
+- **Stuck on "Transcribing…" or "Cleaning…" right after a fresh install.** Almost always a
+  one-time download finishing in the background, not a hang. Two things download on first use:
+  (1) the **speech model** (~1.6 GB) — your first dictation waits for it, and the menu-bar icon
+  shows **"Downloading speech model… (first run)"** until it's ready, then switches to
+  "Transcribing…"; (2) the **AI cleanup model** (`gemma3:4b`) — if Ollama is running but the
+  model was never pulled, LocalFlow now downloads it itself (the menu shows **"Downloading AI
+  cleanup model…"**). Cleanup never blocks dictation: while its model is missing or downloading,
+  LocalFlow simply inserts the **raw transcript** and notes it briefly, so dictation always
+  works. If you'd rather pull the cleanup model manually, run `ollama pull gemma3:4b`.
 - **Auto-paste stopped working after a rebuild.** An ad-hoc-signed rebuild changes the
   binary's signature, so macOS resets its Accessibility / Input Monitoring grants. The
   permanent fix is [stable signing](#stable-signing-recommended) — run
@@ -370,6 +379,13 @@ Menu bar → **Settings…**:
   overwritten — never transcribed, stored, or transmitted. Prefer the dot to appear only
   while dictating? Turn off *Instant capture* in Settings (dictation then takes a beat to
   start).
+- **Stuck on "Transcribing…" or "Cleaning…" after a fresh install?** Two likely causes,
+  both self-resolving. (1) Your very first dictation waits for the ~1.6 GB speech model to
+  finish downloading — the menu bar now shows *Downloading speech model… (first run)* while
+  that happens; wait for **Ready**. (2) If the AI-cleanup model is missing (say the installer
+  step was interrupted), LocalFlow downloads it itself at launch (*Downloading AI cleanup
+  model…* in the menu) — and cleanup always falls back to inserting the raw transcript
+  rather than blocking, so dictation keeps working throughout.
 
 ## Roadmap
 

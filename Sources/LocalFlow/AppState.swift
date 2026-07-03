@@ -38,7 +38,9 @@ final class AppState: ObservableObject {
 
     enum Status: Equatable {
         case idle
-        case loadingModel
+        /// Optional detail overrides the default "Loading model…" copy — used to
+        /// say "Downloading speech model… (first run)" during the initial fetch.
+        case loadingModel(String?)
         case recording
         case recordingLocked
         case transcribing
@@ -50,7 +52,7 @@ final class AppState: ObservableObject {
         var menuText: String {
             switch self {
             case .idle: return "Ready"
-            case .loadingModel: return "Loading model…"
+            case .loadingModel(let detail): return detail ?? "Loading model…"
             case .recording: return "Recording…"
             case .recordingLocked: return "Recording (locked)"
             case .transcribing: return "Transcribing…"
@@ -81,6 +83,20 @@ final class AppState: ObservableObject {
 
     @Published private(set) var status: Status = .idle
 
+    /// Background (non-dictation) activity surfaced in the menu bar only — never
+    /// in the HUD, and never touching the dictation status machine. Used for the
+    /// self-healing cleanup-model download so it can run while dictation proceeds
+    /// normally underneath it.
+    enum BackgroundActivity: Equatable {
+        /// Persists for the whole download; shown in the menu whenever idle.
+        case downloadingCleanupModel
+        /// A transient one-liner (e.g. "AI cleanup ready") that auto-clears.
+        case note(String)
+    }
+
+    @Published private(set) var backgroundActivity: BackgroundActivity?
+    private var backgroundActivityTask: Task<Void, Never>?
+
     /// The current dictation shortcut, mirrored here so menu/HUD copy updates reactively
     /// when the user changes it in Settings. Refreshed via `refreshHotkeyBinding()`.
     @Published private(set) var hotkeyBinding: HotkeyBinding = HotkeyBinding.load()
@@ -89,6 +105,14 @@ final class AppState: ObservableObject {
     /// finish gesture ("tap Right Option to finish", "press ⌘⇧D to finish").
     var statusMenuText: String {
         if status == .recordingLocked { return hotkeyBinding.lockedStatusText }
+        // While idle, surface background activity (e.g. the cleanup-model download)
+        // in the menu. Any real dictation status always takes precedence.
+        if status == .idle, let activity = backgroundActivity {
+            switch activity {
+            case .downloadingCleanupModel: return "Downloading AI cleanup model…"
+            case .note(let text): return text
+            }
+        }
         return status.menuText
     }
 
@@ -134,6 +158,10 @@ final class AppState: ObservableObject {
     /// The single main engine, wrapped so a streaming chunk, the post-release
     /// tail, and any other caller never transcribe concurrently.
     private var engine: SerialTranscriptionEngine
+    /// Whether the main engine has ever finished loading. Distinguishes the
+    /// first-run model download (slow, ~1.6 GB) from a later reload of a cached
+    /// model, so the loading status can be honest about which is happening.
+    private var engineHasLoadedOnce = false
     private let inserter = TextInserter()
     private let cleaner = TranscriptCleaner()
     private var partials: PartialTranscriber?
@@ -185,12 +213,15 @@ final class AppState: ObservableObject {
 
     /// Loads (and if needed downloads) the model. Safe to call at launch.
     func preloadEngine() async {
-        setStatus(.loadingModel)
+        // First run downloads ~1.6 GB, so say so; a reload of an already-cached
+        // model is quick and keeps the plain "Loading model…" copy.
+        setStatus(.loadingModel(engineHasLoadedOnce ? nil : "Downloading speech model… (first run)"))
         do {
             try await engine.preload()
+            engineHasLoadedOnce = true
             if let note = await engine.statusNote {
                 setStatus(.error(note))
-            } else if status == .loadingModel {
+            } else if case .loadingModel = status {
                 setStatus(.idle)
             }
         } catch {
@@ -201,7 +232,26 @@ final class AppState: ObservableObject {
     /// Rebuilds the engine after the model choice changes, then reloads.
     func reloadEngine() {
         engine = SerialTranscriptionEngine(engine: WhisperKitEngine(model: configuredModelName()))
+        engineHasLoadedOnce = false
         Task { await preloadEngine() }
+    }
+
+    /// Shows the honest loading status until the main engine is ready, then flips
+    /// to .transcribing. On first run the model download can take minutes; without
+    /// this a finished dictation would sit on "Transcribing…" the whole time and
+    /// look hung. When the engine is already loaded this is a cheap no-op that just
+    /// sets .transcribing.
+    private func ensureReadyThenTranscribing() async {
+        if await engine.isReady {
+            setStatus(.transcribing)
+            return
+        }
+        setStatus(.loadingModel(engineHasLoadedOnce ? nil : "Downloading speech model… (first run)"))
+        // preload() is idempotent and serialized: this waits for the in-flight
+        // first-run load (or starts one) and returns once the model is ready.
+        try? await engine.preload()
+        engineHasLoadedOnce = true
+        setStatus(.transcribing)
     }
 
     // MARK: - Instant capture (keeps the mic warm)
@@ -258,6 +308,71 @@ final class AppState: ObservableObject {
         guard TranscriptCleaner.isEnabled else { return }
         let model = TranscriptCleaner.model
         Task.detached { await OllamaClient().preload(model: model) }
+    }
+
+    /// Guards against two heals running at once (launch + a Settings change).
+    private var cleanupHealTask: Task<Void, Never>?
+
+    /// Self-heals a missing cleanup model. When cleanup is enabled and the Ollama
+    /// server is reachable but doesn't have the configured model, this downloads
+    /// it in the background so cleanup starts working without the user ever
+    /// touching a terminal — the exact silent failure a fresh install hit.
+    ///
+    /// Fire-and-forget and non-blocking: dictation keeps working throughout, with
+    /// cleanup falling back to inserting the raw transcript until the model lands.
+    /// No-op when cleanup is off or the server is down (cleanup just degrades
+    /// gracefully, as before). Safe to call repeatedly — at launch and whenever
+    /// the cleanup model changes in Settings; a newer call supersedes an older one.
+    func healCleanupModelIfNeeded() {
+        guard TranscriptCleaner.isEnabled else {
+            // Cleanup was turned off — drop any stale download indicator.
+            cleanupHealTask?.cancel()
+            cleanupHealTask = nil
+            if backgroundActivity != nil { setBackgroundActivity(nil) }
+            return
+        }
+        cleanupHealTask?.cancel()
+        let model = TranscriptCleaner.model
+        cleanupHealTask = Task { [weak self] in
+            let client = OllamaClient()
+            // nil = server unreachable → leave it alone (cleanup degrades to raw).
+            guard let available = await client.availableModels() else { return }
+            if OllamaClient.modelListContains(available, model) {
+                // Already present — clear any leftover download indicator.
+                self?.setBackgroundActivity(nil)
+                return
+            }
+            guard !Task.isCancelled else { return }
+
+            self?.setBackgroundActivity(.downloadingCleanupModel)
+            do {
+                try await client.pullModel(model)
+                // Confirm it actually landed before declaring success.
+                let ready = await client.hasModel(model)
+                self?.setBackgroundActivity(
+                    ready ? .note("AI cleanup ready")
+                          : .note("AI cleanup unavailable — dictation still works"))
+            } catch {
+                // A cancellation means a newer heal took over — say nothing.
+                if Task.isCancelled { return }
+                self?.setBackgroundActivity(.note("AI cleanup unavailable — dictation still works"))
+            }
+        }
+    }
+
+    /// Sets the menu-bar background activity. A `.note` auto-clears after 5s (like
+    /// the transient error notes); the `.downloadingCleanupModel` indicator
+    /// persists until explicitly replaced or cleared.
+    private func setBackgroundActivity(_ activity: BackgroundActivity?) {
+        backgroundActivity = activity
+        backgroundActivityTask?.cancel()
+        backgroundActivityTask = nil
+        guard case .note = activity else { return }
+        backgroundActivityTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 5 * 1_000_000_000)
+            guard let self, !Task.isCancelled else { return }
+            if case .note = self.backgroundActivity { self.backgroundActivity = nil }
+        }
     }
 
     private func startPartials() {
@@ -375,7 +490,11 @@ final class AppState: ObservableObject {
             return
         }
 
-        setStatus(.transcribing)
+        // Immediate feedback on release. ensureReadyThenTranscribing() below turns
+        // this into the honest loading/transcribing status once the engine state is
+        // known — critical on first run, when the speech model is still downloading
+        // and a bare "Transcribing…" would read as a multi-minute hang.
+        setStatus(engineHasLoadedOnce ? .transcribing : .loadingModel("Downloading speech model… (first run)"))
         Task {
             // Finish any in-flight partial before the authoritative final pass so
             // the two never run concurrently.
@@ -385,6 +504,10 @@ final class AppState: ObservableObject {
             // `committedChunkCount` and the tail range are final.
             supervisor?.cancel()
             _ = await supervisor?.value
+
+            // Never show "Transcribing…" while the model is still loading: surface
+            // the loading status and wait for the engine to be ready first.
+            await ensureReadyThenTranscribing()
 
             guard let transcriber, let source else {
                 await runTranscription(finalSamples)

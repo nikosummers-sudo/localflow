@@ -44,6 +44,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         // Warm the Ollama cleanup model in parallel — it's independent of WhisperKit.
         AppState.shared.warmCleanupModel()
+        // Self-heal a missing cleanup model: if Ollama is up but the model was
+        // never pulled (the silent fresh-install failure), download it in the
+        // background. Never blocks dictation; cleanup falls back to raw meanwhile.
+        AppState.shared.healCleanupModelIfNeeded()
 
         // Start continuous instant capture if the setting is on and the mic is
         // already granted; the permission-change hook below covers granting later.
@@ -134,7 +138,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     AppState.shared.refreshHotkeyBinding()
                 },
                 onPartialsChanged: { AppState.shared.reloadPartials() },
-                onCleanupChanged: { AppState.shared.warmCleanupModel() },
+                onCleanupChanged: {
+                    // Fires for both the cleanup toggle and the model field: warm
+                    // the model, and heal (download) it if it's now missing.
+                    AppState.shared.warmCleanupModel()
+                    AppState.shared.healCleanupModelIfNeeded()
+                },
                 onInstantCaptureChanged: { AppState.shared.refreshContinuousCapture() },
                 onDockVisibilityChanged: { [weak self] visible in self?.setDockVisible(visible) }
             )
