@@ -17,15 +17,6 @@ public final class WhisperKitEngine: TranscriptionEngine {
     /// Special tokens Whisper can emit (e.g. <|startoftranscript|>, <|en|>, <|0.00|>).
     private static let specialTokenPattern = try? NSRegularExpression(pattern: "<\\|[^|]*\\|>")
 
-    /// Cap for the decoding-prompt token count. WhisperKit trims to its own
-    /// (larger) limit by keeping the suffix; we cap tighter so the prompt can't
-    /// crowd out the actual transcription context.
-    private static let maxPromptTokens = 180
-
-    /// Minimum audio length (samples at Whisper's fixed 16 kHz) before the
-    /// empty-decode retry is worth running. 1.0s — see `transcribe`.
-    private static let minRetrySamples = 16_000
-
     /// Empty marker file dropped inside a model folder once that model has fully
     /// downloaded AND loaded at least once. See `markVerified` / `modelVerified`.
     static let verifiedSentinelName = ".localflow-verified"
@@ -46,11 +37,6 @@ public final class WhisperKitEngine: TranscriptionEngine {
         let sentinel = folder.appendingPathComponent(verifiedSentinelName)
         return FileManager.default.fileExists(atPath: sentinel.path)
     }
-
-    /// Encoded vocabulary prompt, cached so we only re-tokenize when the terms
-    /// actually change (the prompt is rebuilt on every transcribe call).
-    private var cachedVocabSignature = ""
-    private var cachedPromptTokens: [Int]?
 
     public var isReady: Bool { whisperKit != nil }
 
@@ -118,7 +104,7 @@ public final class WhisperKitEngine: TranscriptionEngine {
     private func warmUp() async {
         guard let whisperKit else { return }
         let silence = [Float](repeating: 0, count: 16000)
-        _ = try? await whisperKit.transcribe(audioArray: silence, decodeOptions: decodingOptions(promptTokens: nil))
+        _ = try? await whisperKit.transcribe(audioArray: silence, decodeOptions: decodingOptions())
     }
 
     public func transcribe(samples: [Float]) async throws -> String {
@@ -131,29 +117,10 @@ public final class WhisperKitEngine: TranscriptionEngine {
             engine = ready
         }
 
-        let prompt = vocabularyPromptTokens()
         let results = try await engine.transcribe(
-            audioArray: samples, decodeOptions: decodingOptions(promptTokens: prompt)
+            audioArray: samples, decodeOptions: decodingOptions()
         )
-        var text = WhisperKitEngine.clean(results.map(\.text).joined(separator: " "))
-
-        // A vocabulary prompt can drive Whisper's decoder straight to end-of-text
-        // on SHORT clips, yielding an empty transcription (field-observed: short
-        // dictations "vanished" once the personal dictionary had its first term).
-        // Decode once more without the prompt — dictionary bias is a nice-to-have;
-        // the user's words are not. Gated on >= 1.0s of audio: a genuinely empty
-        // sub-second clip is almost always silence, and re-running a full pass on
-        // every one of them just doubles latency for no gain.
-        if text.isEmpty, prompt != nil, samples.count >= WhisperKitEngine.minRetrySamples {
-            EventLog.log("stt.emptyWithPrompt", [
-                "samples": String(samples.count), "action": "retryNoPrompt",
-            ])
-            let retry = try await engine.transcribe(
-                audioArray: samples, decodeOptions: decodingOptions(promptTokens: nil)
-            )
-            text = WhisperKitEngine.clean(retry.map(\.text).joined(separator: " "))
-        }
-        return text
+        return WhisperKitEngine.clean(results.map(\.text).joined(separator: " "))
     }
 
     /// Decoding options tuned for dictation latency:
@@ -165,45 +132,24 @@ public final class WhisperKitEngine: TranscriptionEngine {
     ///    whose text is pathologically repetitive, so a silent or near-silent
     ///    clip can't emit invented words. Set explicitly to pin the intent; these
     ///    values match WhisperKit 0.18's own defaults.
-    private func decodingOptions(promptTokens: [Int]?) -> DecodingOptions {
+    ///
+    /// We deliberately pass NO `promptTokens`. A vocabulary prompt built from the
+    /// personal dictionary biased Whisper's decoder toward those terms and, on
+    /// quiet or ambiguous audio, made it hallucinate and REPEAT them — "n8n n8n
+    /// n8n" in speech that never contained the word (field-reported 2026-07-10).
+    /// This is the well-known `initial_prompt` failure mode; a post-hoc guard
+    /// still leaks stray single insertions, so we remove the bias at the source.
+    /// Learned terms now drive only the deterministic find→replace rule and the
+    /// cleanup spelling hint, never the STT decoder.
+    private func decodingOptions() -> DecodingOptions {
         DecodingOptions(
             task: .transcribe,
             skipSpecialTokens: true,
             withoutTimestamps: true,
-            promptTokens: promptTokens,
             compressionRatioThreshold: 2.4,
             noSpeechThreshold: 0.6,
             chunkingStrategy: .vad
         )
-    }
-
-    /// Tokenizes the user's personal-dictionary terms into a decoding prompt so
-    /// WhisperKit biases toward those spellings. Returns nil when there is no
-    /// vocabulary or the tokenizer isn't ready yet. WhisperKit filters out any
-    /// special tokens and prepends its own <|startofprev|>, so we pass the raw
-    /// encoded phrase tokens. Cached by term signature to avoid re-encoding on
-    /// every chunk. Safe because all transcribe calls are serialized through the
-    /// SerialTranscriptionEngine actor.
-    private func vocabularyPromptTokens() -> [Int]? {
-        guard let tokenizer = whisperKit?.tokenizer else { return nil }
-        let terms = LocalFlowConfig.shared.currentTerms()
-        let signature = terms.joined(separator: "\u{1}")
-        if signature == cachedVocabSignature { return cachedPromptTokens }
-
-        cachedVocabSignature = signature
-        guard !terms.isEmpty else {
-            cachedPromptTokens = nil
-            return nil
-        }
-
-        let phrase = "Vocabulary: " + terms.joined(separator: ", ") + "."
-        var tokens = tokenizer.encode(text: phrase)
-        if tokens.count > WhisperKitEngine.maxPromptTokens {
-            // Keep the most recent terms (the suffix); the oldest fall off.
-            tokens = Array(tokens.suffix(WhisperKitEngine.maxPromptTokens))
-        }
-        cachedPromptTokens = tokens
-        return tokens
     }
 
     /// Cheap decode for live preview passes over short clips: no VAD chunking

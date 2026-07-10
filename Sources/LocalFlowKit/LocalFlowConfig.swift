@@ -87,7 +87,20 @@ public final class LocalFlowConfig: @unchecked Sendable {
 
     private static func load<T: Decodable>(_ type: T.Type, from url: URL) -> T? {
         guard let data = try? Data(contentsOf: url) else { return nil }
-        return try? JSONDecoder().decode(T.self, from: data)
+        do {
+            return try JSONDecoder().decode(T.self, from: data)
+        } catch {
+            // The file exists but won't decode (real corruption, or a partial write
+            // from an older non-atomic version). Returning nil makes the caller fall
+            // back to an EMPTY value — and the next mutation (a Settings edit or a
+            // correction) would then overwrite this file, silently wiping the user's
+            // dictionary. Quarantine it alongside as ".corrupt" first so the data is
+            // preserved and recoverable rather than destroyed.
+            let quarantine = url.appendingPathExtension("corrupt")
+            try? FileManager.default.removeItem(at: quarantine)
+            try? FileManager.default.moveItem(at: url, to: quarantine)
+            return nil
+        }
     }
 
     private static func save<T: Encodable>(_ value: T, to url: URL) {

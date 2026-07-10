@@ -65,7 +65,12 @@ public final class HistoryStore: @unchecked Sendable {
     private var _records: [DictationRecord]
     private let historyURL: URL
     /// Serializes disk writes in mutation order, so an older snapshot can never
-    /// land on disk after a newer one (the writes themselves stay atomic).
+    /// land on disk after a newer one (the writes themselves stay atomic). Writes
+    /// are dispatched with `.sync` so the snapshot is flushed to disk BEFORE the
+    /// mutation returns: an async write left the most-recent dictation unsaved if
+    /// the app quit or crashed right after it (field-reported 2026-07-10 — history
+    /// "didn't hold anything"). A per-dictation JSON write is cheap; correctness
+    /// beats shaving a millisecond off an already-infrequent path.
     private let saveQueue = DispatchQueue(label: "localflow.history.save", qos: .utility)
 
     /// `directory` is injectable so tests/CLIs can point at a scratch location.
@@ -86,7 +91,7 @@ public final class HistoryStore: @unchecked Sendable {
         let snapshot = _records
         let url = historyURL
         lock.unlock()
-        saveQueue.async { HistoryStore.save(snapshot, to: url) }
+        saveQueue.sync { HistoryStore.save(snapshot, to: url) }
     }
 
     /// All records, newest first.
@@ -105,7 +110,7 @@ public final class HistoryStore: @unchecked Sendable {
         let snapshot = _records
         let url = historyURL
         lock.unlock()
-        saveQueue.async { HistoryStore.save(snapshot, to: url) }
+        saveQueue.sync { HistoryStore.save(snapshot, to: url) }
     }
 
     public func delete(id: UUID) {
@@ -114,7 +119,7 @@ public final class HistoryStore: @unchecked Sendable {
         let snapshot = _records
         let url = historyURL
         lock.unlock()
-        saveQueue.async { HistoryStore.save(snapshot, to: url) }
+        saveQueue.sync { HistoryStore.save(snapshot, to: url) }
     }
 
     public func clear() {
@@ -129,7 +134,19 @@ public final class HistoryStore: @unchecked Sendable {
 
     private static func load<T: Decodable>(_ type: T.Type, from url: URL) -> T? {
         guard let data = try? Data(contentsOf: url) else { return nil }
-        return try? JSONDecoder().decode(T.self, from: data)
+        do {
+            return try JSONDecoder().decode(T.self, from: data)
+        } catch {
+            // The file exists but won't decode (real corruption, or a partial write
+            // from an older non-atomic version). Returning nil makes the caller fall
+            // back to an EMPTY value — and the next mutation would then overwrite this
+            // file, silently destroying recoverable data. Quarantine it alongside as
+            // ".corrupt" first so nothing is lost and it can be recovered.
+            let quarantine = url.appendingPathExtension("corrupt")
+            try? FileManager.default.removeItem(at: quarantine)
+            try? FileManager.default.moveItem(at: url, to: quarantine)
+            return nil
+        }
     }
 
     private static func save<T: Encodable>(_ value: T, to url: URL) {

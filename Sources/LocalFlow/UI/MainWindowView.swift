@@ -273,9 +273,15 @@ struct MainWindowView: View {
     }
 
     /// Persists the corrected record text and — when the user chose to teach it —
-    /// adds the whole-word rule to the personal dictionary AND the corrected
-    /// phrase to the vocabulary, so STT bias, cleanup, and the hard replacement
-    /// all learn it. Deduplicated so repeated fixes don't pile up.
+    /// adds a whole-word find→replace rule to the personal dictionary. Deduplicated
+    /// so repeated fixes don't pile up.
+    ///
+    /// Deliberately does NOT add the corrected word to the vocabulary bias list:
+    /// auto-growing that list made Whisper hallucinate and repeat learned terms
+    /// into unrelated speech ("n8n n8n n8n"; field-reported 2026-07-10). The
+    /// deterministic replacement is the safe way to learn — it can only change
+    /// text where its "find" actually matches, so it can never insert a word the
+    /// speaker didn't say. The vocabulary list is user-curated in Settings only.
     private func applyCorrection(to record: DictationRecord, newText: String, learn: Bool, original: String, corrected: String) {
         HistoryStore.shared.updateText(id: record.id, newText: newText)
 
@@ -287,11 +293,6 @@ struct MainWindowView: View {
                    $0.find.caseInsensitiveCompare(rule.find) == .orderedSame && $0.replace == rule.replace
                }) {
                 dictionary.replacements.append(rule)
-            }
-            let term = corrected.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !term.isEmpty,
-               !dictionary.terms.contains(where: { $0.caseInsensitiveCompare(term) == .orderedSame }) {
-                dictionary.terms.append(term)
             }
             LocalFlowConfig.shared.dictionary = dictionary
         }

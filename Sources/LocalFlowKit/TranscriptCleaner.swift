@@ -80,8 +80,13 @@ public struct TranscriptCleaner: Sendable {
 
     /// System prompt for `.clean` is fixed and intentionally strict: clean, do
     /// not rewrite. This is the base; `systemPrompt(context:)` layers optional
-    /// rules on top.
-    public static let systemPrompt = "You are a dictation cleanup engine. The user message is a raw speech-to-text transcript. Return ONLY the cleaned transcript — no preamble, no quotes, no commentary. Rules: fix punctuation, capitalization, and spacing; remove filler words (um, uh, you know, like — only when used as filler); remove false starts and immediate self-corrections, keeping the speaker's final intent; when the speaker clearly enumerates items (\"first… second… third\", \"one is… another is…\", or a spoken run of three or more parallel items), format each item on its own line starting with \"- \"; do NOT add, answer, summarize, translate, or rephrase content; do NOT change wording beyond removing fillers and false starts; preserve the transcript's language."
+    /// rules on top. Deliberately does NOT format lists: a "format enumerations
+    /// as - lines" rule made small models explode a coordinated run-on ("run the
+    /// hotels and give me the data then create an account") into one bullet per
+    /// word — every content word survives so the content guards pass it
+    /// (field-reported 2026-07-07). Deliberate bullets belong to the
+    /// deterministic "new bullet" voice command, matching `.refine`.
+    public static let systemPrompt = "You are a dictation cleanup engine. The user message is a raw speech-to-text transcript. Return ONLY the cleaned transcript — no preamble, no quotes, no commentary. Rules: fix punctuation, capitalization, and spacing; remove filler words (um, uh, you know, like — only when used as filler); remove false starts and immediate self-corrections, keeping the speaker's final intent; do NOT add, answer, summarize, translate, or rephrase content; do NOT change wording beyond removing fillers and false starts; do NOT reformat the text into a list or bullet points; preserve the transcript's language."
 
     /// System prompt for `.refine`: reformat the speaker's own point so it reads
     /// well. Explicitly bounded — it edits expression and structure, never adds
@@ -226,7 +231,35 @@ public struct TranscriptCleaner: Sendable {
             return (raw, "Cleanup diverged — inserted raw transcript")
         }
 
+        // Cleanup must not invent list formatting. Small models will explode a
+        // coordinated run-on ("do X and Y then Z") into one bullet per word;
+        // every content word survives, so the ratio and Jaccard guards above
+        // pass it. Deliberate bullets come only from the "new bullet" voice
+        // command, which is still an ⟦BP⟧ token at this point (decoded AFTER
+        // guards) — never a literal "- ". So any markdown bullet line the model
+        // added that the raw text lacked can only be invented formatting.
+        if bulletLinesIntroduced(raw: raw, output: output) {
+            return (raw, "Cleanup invented a list — inserted raw transcript")
+        }
+
         return (output, nil)
+    }
+
+    /// True when `output` contains more markdown-style bullet lines than `raw`.
+    /// A bullet line is one whose first non-whitespace characters are "- ", "* ",
+    /// or "• ". At guard time voice-command bullets are still ⟦BP⟧ tokens (they
+    /// decode afterwards), so a literal bullet line here is model-invented
+    /// formatting — the one-word-per-line explosion the content guards miss.
+    public static func bulletLinesIntroduced(raw: String, output: String) -> Bool {
+        let bulletLineCount = { (text: String) -> Int in
+            text.split(separator: "\n", omittingEmptySubsequences: false).reduce(into: 0) { count, line in
+                let trimmed = line.drop { $0 == " " || $0 == "\t" }
+                if trimmed.hasPrefix("- ") || trimmed.hasPrefix("* ") || trimmed.hasPrefix("• ") {
+                    count += 1
+                }
+            }
+        }
+        return bulletLineCount(output) > bulletLineCount(raw)
     }
 
     /// True when every distinct digit-run in `raw` still appears somewhere in

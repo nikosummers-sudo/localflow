@@ -69,6 +69,38 @@ if CommandLine.arguments.contains("--store") {
           && reloaded.rule(forBundleID: "com.apple.mail")?.alwaysPaste == false)
 
     try? FileManager.default.removeItem(at: dir)
+
+    // Corrupt-file quarantine: a present-but-undecodable dictionary.json must NOT
+    // be silently overwritten with an empty one (that path could wipe a user's
+    // dictionary — field-reported 2026-07-10). It's preserved as ".corrupt" and
+    // the store starts fresh instead.
+    do {
+        let badDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("localflow-dictcheck-corrupt-\(UUID().uuidString)", isDirectory: true)
+        try? FileManager.default.createDirectory(at: badDir, withIntermediateDirectories: true)
+        let dictURL = badDir.appendingPathComponent("dictionary.json")
+        let garbage = "{ this is not valid json "
+        try? garbage.write(to: dictURL, atomically: true, encoding: .utf8)
+
+        let recovered = LocalFlowConfig(directory: badDir)
+        let quarantine = badDir.appendingPathComponent("dictionary.json.corrupt")
+        check("undecodable dictionary loads as empty (no crash, no wipe)",
+              recovered.dictionary == PersonalDictionary())
+        check("undecodable dictionary is quarantined as .corrupt",
+              FileManager.default.fileExists(atPath: quarantine.path))
+        check("quarantined file preserves the original bytes verbatim",
+              (try? String(contentsOf: quarantine, encoding: .utf8)) == garbage)
+
+        // A subsequent write starts a clean file and must NOT destroy the quarantine.
+        recovered.dictionary = PersonalDictionary(terms: ["Recovered"])
+        check("fresh write after quarantine persists",
+              LocalFlowConfig(directory: badDir).dictionary.terms == ["Recovered"])
+        check("quarantine survives the fresh write",
+              FileManager.default.fileExists(atPath: quarantine.path))
+
+        try? FileManager.default.removeItem(at: badDir)
+    }
+
     print(failures == 0 ? "STORE: OK" : "STORE: \(failures) FAILURE(S)")
     exit(failures == 0 ? 0 : 1)
 }
@@ -308,7 +340,10 @@ if CommandLine.arguments.contains("--history") {
     }
 
     // --- Full correction loop, headlessly: fix a record AND teach the dictionary,
-    //     then prove a future dictation auto-corrects. Prints outputs verbatim.
+    //     then prove a future dictation auto-corrects. Mirrors applyCorrection's
+    //     policy: learn a deterministic replacement rule ONLY, never a vocabulary
+    //     bias term — auto-adding terms made Whisper hallucinate and repeat them
+    //     into unrelated speech (field-reported 2026-07-10). Prints outputs verbatim.
     let loopDir = scratchDir()
     do {
         let store = HistoryStore(directory: loopDir)
@@ -323,11 +358,11 @@ if CommandLine.arguments.contains("--history") {
         let corrected = "Ollama"
         let newText = DictationHistory.applyingCorrection(to: record.text, selection: selection, corrected: corrected)
 
-        // "Fix & auto-correct": update the record, add the rule, add the vocab term.
+        // "Fix & auto-correct": update the record and add the replacement rule.
+        // NOTE: no dictionary.terms.append — corrections must not grow the STT bias list.
         store.updateText(id: record.id, newText: newText)
         var dictionary = config.dictionary
         dictionary.replacements.append(DictationHistory.makeCorrectionRule(original: original, corrected: corrected))
-        dictionary.terms.append(corrected)
         config.dictionary = dictionary
 
         let updatedText = store.all().first!.text
@@ -346,7 +381,7 @@ if CommandLine.arguments.contains("--history") {
 
         check("record text is updated in place", updatedText == "please use Ollama for cleanup")
         check("dictionary learned the replacement rule", learnedRule)
-        check("dictionary learned the vocabulary term", learnedTerm)
+        check("correction does NOT auto-add a vocabulary bias term", !learnedTerm)
         check("a future dictation auto-corrects", futureDictation == "i said Ollama again")
     }
     try? FileManager.default.removeItem(at: loopDir)
@@ -593,6 +628,29 @@ if CommandLine.arguments.contains("--cleaner") {
               TC.refineBudgetSeconds(for: String(repeating: "a", count: 1_500)) == 10.0)
         check("budget is capped at 20s",
               TC.refineBudgetSeconds(for: String(repeating: "a", count: 100_000)) == 20.0)
+    }
+
+    // 11) Bullet-explosion regression (field-reported 2026-07-07): a coordinated
+    //     run-on ("run the hotels and give me the data then create an account")
+    //     made a small model explode every word onto its own "- " line. The
+    //     content guards miss it (every word survives), so (a) the clean prompt
+    //     must no longer invite lists and (b) the formatting guard must reject an
+    //     output that invents bullet lines the raw never had.
+    do {
+        let cleanCtx = CleanupContext(includePlaceholderRule: false, mode: .clean)
+        check("clean prompt forbids list reformatting",
+              TC.systemPrompt(context: cleanCtx).contains("do NOT reformat the text into a list"))
+        check("clean prompt dropped the enumerate-as-bullets instruction",
+              !TC.systemPrompt(context: cleanCtx).contains("on its own line starting with"))
+
+        let raw = "she was going to run the 50 hotels and give me the data then also create a service account"
+        let exploded = "she was going to\n- run\n- the\n- 50\n- hotels\n- and\n- give\n- me\n- the\n- data\n- then\n- also\n- create\n- a\n- service\n- account"
+        check("bulletLinesIntroduced detects model-invented bullets",
+              TC.bulletLinesIntroduced(raw: raw, output: exploded))
+        check("word-per-bullet explosion falls back to raw despite surviving content",
+              TC.applyGuards(cleaned: exploded, raw: raw).text == raw)
+        check("bullets already present in the raw are not counted as invented",
+              !TC.bulletLinesIntroduced(raw: "- one\n- two", output: "- one\n- two"))
     }
 
     print(failures == 0 ? "CLEANER: OK" : "CLEANER: \(failures) FAILURE(S)")

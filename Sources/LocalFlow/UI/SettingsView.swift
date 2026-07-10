@@ -253,7 +253,7 @@ private struct DictionaryTab: View {
     var body: some View {
         Form {
             Section("Vocabulary") {
-                Text("Proper nouns and jargon the model should spell correctly (e.g. Triptease, WhisperKit). These bias transcription and are preserved during cleanup — a soft hint, not a guarantee.")
+                Text("Proper nouns and jargon the cleanup model should keep spelled correctly (e.g. Triptease, WhisperKit) — a soft hint applied during cleanup, not a guarantee. For a spelling the recognizer keeps getting wrong, add a Replacement below instead.")
                     .font(.caption)
                     .foregroundColor(.secondary)
 
