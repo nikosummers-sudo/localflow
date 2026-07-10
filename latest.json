@@ -1,7 +1,7 @@
 {
-  "build": 8,
-  "shortVersion": "0.6.1",
-  "url": "https://github.com/nikosummers-sudo/localflow/releases/download/v8/LocalFlow.app.zip",
-  "sha256": "dd36140e8a4c7ac5d90ebbe3bdbb44ef22e190b8884bc422ed795bf49fe6599b",
+  "build": 9,
+  "shortVersion": "0.6.2",
+  "url": "https://github.com/nikosummers-sudo/localflow/releases/download/v9/LocalFlow.app.zip",
+  "sha256": "d333fd84937fb4f77e39a661ea235c5f02533833844695723dc5b53df7fbcbc1",
   "minMacOS": 14
 }
